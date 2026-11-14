@@ -13,12 +13,16 @@
   <button type="button" data-rgb="250,220,40">Save yellow</button>
   <p id="found" role="status" aria-live="polite"></p>
 
+  <div id="image-picker"></div>
   <div id="palette"></div>
 
   <script type="module">
     import { classifyColor } from "/src/vision/colorDetector.js";
     import { saveColor } from "/js/huememory.js";
     import { mountPalette } from "/js/palettePanel.js";
+    import { mountImagePicker } from "/js/imagePicker.js";
+
+    mountImagePicker(document.getElementById("image-picker"));
 
     mountPalette(document.getElementById("palette"), {
       onFindAgain: (color) => {
