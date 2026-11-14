@@ -73,7 +73,7 @@ export function getStats() {
   return request(`/api/colors/stats?sessionId=${encodeURIComponent(getSessionId())}`);
 }
 
-export function createTask({ summary, steps = [], visualCues = [], color = "", object = "", action = "", destination = "" }) {
+export function createTask({ summary, steps = [], visualCues = [], color = "", object = "", action = "", destination = "", relation = "" }) {
   return request("/api/tasks", {
     method: "POST",
     body: JSON.stringify({
@@ -84,6 +84,7 @@ export function createTask({ summary, steps = [], visualCues = [], color = "", o
       object,
       action,
       destination,
+      relation,
       sessionId: getSessionId()
     })
   });
@@ -107,5 +108,13 @@ export function interpret(text = "", image = null) {
   return request("/api/interpret", {
     method: "POST",
     body: JSON.stringify({ text, image })
+  });
+}
+
+// Checks a new picture to see if the guided task is finished. Returns { done, message, locations }.
+export function checkTask(image, task) {
+  return request("/api/interpret/check", {
+    method: "POST",
+    body: JSON.stringify({ image, task })
   });
 }

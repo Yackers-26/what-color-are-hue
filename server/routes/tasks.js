@@ -14,6 +14,7 @@ router.post("/", async (req, res) => {
     object = "",
     action = "",
     destination = "",
+    relation = "",
     sessionId
   } = req.body ?? {};
 
@@ -30,6 +31,7 @@ router.post("/", async (req, res) => {
     object: String(object || "").trim(),
     action: String(action || "").trim(),
     destination: String(destination || "").trim(),
+    relation: String(relation || "").trim(),
     sessionId: String(sessionId),
     completed: false,
     createdAt: new Date()
@@ -55,7 +57,7 @@ router.patch("/:id", async (req, res) => {
   if (!sessionId) return res.status(400).json({ error: "sessionId is required" });
   if (!ObjectId.isValid(req.params.id)) return res.status(400).json({ error: "Invalid id" });
 
-  const allowed = ["summary", "steps", "visualCues", "color", "object", "action", "destination", "completed"];
+  const allowed = ["summary", "steps", "visualCues", "color", "object", "action", "destination", "relation", "completed"];
   const updates = {};
   for (const key of allowed) {
     if (req.body?.[key] !== undefined) updates[key] = req.body[key];

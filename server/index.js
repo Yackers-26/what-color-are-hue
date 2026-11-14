@@ -33,8 +33,14 @@ app.use("/api/interpret", interpretRouter);
 app.use((err, req, res, next) => {
   console.error(err);
   const unavailable = /MongoDB is not connected/i.test(err.message || "");
-  res.status(unavailable ? 503 : 500).json({
-    error: unavailable ? err.message : "Server error",
+  // Request problems (photo too large, bad JSON) come with a 4xx status; say what went wrong.
+  const clientError = Number(err.status) >= 400 && Number(err.status) < 500;
+  const status = unavailable ? 503 : clientError ? err.status : 500;
+  const message = err.type === "entity.too.large"
+    ? "That photo is too large. Try a smaller photo."
+    : unavailable || clientError ? err.message : "Server error";
+  res.status(status).json({
+    error: message,
     ...(process.env.NODE_ENV === "development" ? { details: err.message } : {})
   });
 });

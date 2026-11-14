@@ -5,9 +5,18 @@ import {
   createTask,
   loadTasks,
   completeTask,
-  interpret
+  interpret,
+  checkTask
 } from "/js/huememory.js";
 import { mountPalette } from "/js/palettePanel.js";
+import {
+  parseInstruction,
+  buildGuideSteps,
+  describeTask,
+  describeTarget,
+  normalizeColorName,
+  normalizeRelation
+} from "/js/hueDoParser.js";
 import { mountImagePicker } from "/js/imagePicker.js";
 
 const $ = (id) => document.getElementById(id);
@@ -57,9 +66,18 @@ const instructionImagePreview = $("instructionImagePreview");
 const interpretBtn = $("interpretBtn");
 const interpretStatus = $("interpretStatus");
 const parsedTask = $("parsedTask");
-const taskSummaryInput = $("taskSummaryInput");
+const taskSourceNote = $("taskSourceNote");
+const taskReadback = $("taskReadback");
+const taskColorInput = $("taskColorInput");
+const taskAnswer = $("taskAnswer");
+const snapshotBtn = $("snapshotBtn");
+const clearSceneBtn = $("clearSceneBtn");
+const checkPictureBtn = $("checkPictureBtn");
+const taskObjectInput = $("taskObjectInput");
+const taskActionInput = $("taskActionInput");
+const taskDestinationInput = $("taskDestinationInput");
+const readTaskBtn = $("readTaskBtn");
 const taskStepsPreview = $("taskStepsPreview");
-const taskCuePreview = $("taskCuePreview");
 const saveTaskBtn = $("saveTaskBtn");
 const activeTaskEmpty = $("activeTaskEmpty");
 const activeTaskContent = $("activeTaskContent");
@@ -69,6 +87,13 @@ const taskStateMark = $("taskStateMark");
 const clearTaskBtn = $("clearTaskBtn");
 const taskLibrary = $("taskLibrary");
 const refreshTasksBtn = $("refreshTasksBtn");
+const guideStepCard = $("guideStepCard");
+const guideStepCount = $("guideStepCount");
+const guideStepText = $("guideStepText");
+const guideDone = $("guideDone");
+const guideDoneText = $("guideDoneText");
+const prevStepBtn = $("prevStepBtn");
+const repeatStepBtn = $("repeatStepBtn");
 
 // Read pixels from the clean camera image so overlays never affect sampling.
 const samplingCanvas = document.createElement("canvas");
@@ -96,8 +121,9 @@ let activeTask = null;
 let taskCheckFrames = 0;
 let taskSuccessStreak = 0;
 let taskCompletionPending = false;
-let instructionImage = null;
-let instructionImageUrl = null;
+let guideStepIndex = 0;
+let scenePhoto = null; // HueDo picture: taken with the camera button or uploaded
+let sceneLocations = []; // boxes Gemini found in scenePhoto, as fractions of the picture
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
@@ -155,6 +181,7 @@ function setActiveMode(mode) {
 
   setModePreview(nextMode);
   if (nextMode !== "see" && nextMode !== "find" && nextMode !== "do") setCameraChips([]);
+  renderScene();
 }
 
 window.addEventListener("resize", () => placeModePreview(currentMode));
@@ -190,31 +217,6 @@ function normalizeColorCategory(value = "") {
   const color = String(value).trim().toLowerCase();
   const supported = ["red", "orange", "yellow", "green", "cyan", "blue", "purple", "black"];
   return supported.find((name) => color === name || color.includes(name)) || "";
-}
-
-function normalizeZone(value = "") {
-  const match = String(value).match(/\b(?:box|container|bin|zone)?\s*([ABC])\b/i);
-  return match ? `Box ${match[1].toUpperCase()}` : "";
-}
-
-function getZoneBounds(zoneName) {
-  const width = canvas.width || 320;
-  const height = canvas.height || 180;
-  const zoneWidth = width * 0.27;
-  const zoneHeight = height * 0.20;
-  const xByZone = {
-    "Box A": width * 0.035,
-    "Box B": width * 0.365,
-    "Box C": width * 0.695
-  };
-  const zoneX = xByZone[zoneName];
-  if (zoneX === undefined) return null;
-  return {
-    x: Math.round(zoneX),
-    y: Math.round(height * 0.62),
-    width: Math.round(zoneWidth),
-    height: Math.round(zoneHeight)
-  };
 }
 
 const chipColors = {
@@ -314,39 +316,6 @@ function drawRegionOutline(region, accent = "#f7e8a6") {
   ctx.restore();
 }
 
-function drawGuideBoxAt(point, label, accent = "#f3d88c") {
-  if (!point) return;
-  const width = Math.max(42, canvas.width * .19);
-  const height = Math.max(30, canvas.height * .17);
-  const x = clamp(point.x - width / 2, 3, canvas.width - width - 3);
-  const y = clamp(point.y - height / 2, 3, canvas.height - height - 3);
-  ctx.save();
-  ctx.lineWidth = 2.2;
-  ctx.setLineDash([3, 5]);
-  ctx.strokeStyle = "rgba(8,16,13,.78)";
-  ctx.strokeRect(x, y, width, height);
-  ctx.lineWidth = 1.4;
-  ctx.strokeStyle = accent;
-  ctx.strokeRect(x, y, width, height);
-  ctx.restore();
-  return { x: x + width / 2, y: y + height / 2 };
-}
-
-function drawZoneGuide(zoneName, accent = "#f4d78c") {
-  const zone = getZoneBounds(zoneName);
-  if (!zone) return null;
-  ctx.save();
-  ctx.lineWidth = 2.2;
-  ctx.setLineDash([3, 5]);
-  ctx.strokeStyle = "rgba(8,16,13,.78)";
-  ctx.strokeRect(zone.x, zone.y, zone.width, zone.height);
-  ctx.lineWidth = 1.4;
-  ctx.strokeStyle = accent;
-  ctx.strokeRect(zone.x, zone.y, zone.width, zone.height);
-  ctx.restore();
-  return { x: zone.x + zone.width / 2, y: zone.y + zone.height / 2 };
-}
-
 function drawArrow(from, to, accent = "#f4d989") {
   if (!from || !to) return;
   const dx = to.x - from.x;
@@ -385,20 +354,6 @@ function drawArrow(from, to, accent = "#f4d989") {
   ctx.closePath();
   ctx.fill();
   ctx.restore();
-}
-
-function cuePoint(cue = {}) {
-  const zone = normalizeZone(`${cue.location || ""} ${cue.label || ""}`);
-  if (zone) {
-    const bounds = getZoneBounds(zone);
-    if (bounds) return { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
-  }
-
-  const words = `${cue.direction || ""} ${cue.location || ""}`.toLowerCase();
-  const horizontal = /\b(left|leftward)\b/.test(words) ? .2 : /\b(right|rightward)\b/.test(words) ? .8 : .5;
-  const vertical = /\b(above|upper|top|up)\b/.test(words) ? .2 : /\b(below|lower|bottom|down)\b/.test(words) ? .8 : .5;
-  const hasDirection = /\b(left|leftward|right|rightward|above|upper|top|up|below|lower|bottom|down|center|middle)\b/.test(words);
-  return hasDirection ? { x: canvas.width * horizontal, y: canvas.height * vertical } : null;
 }
 
 function getBinaryRegions(mask, width, height, step = 4) {
@@ -517,90 +472,6 @@ function drawTargetOverlay() {
   setFeedback(findResult, `${targetShade || targetColor} detected · ${getApproximateRegion(region)}`);
 }
 
-function drawTaskGuidance() {
-  if (!activeTask || !canvas.width || !canvas.height) {
-    setCameraChips([]);
-    return;
-  }
-
-  const cues = Array.isArray(activeTask.visualCues) ? activeTask.visualCues : [];
-  const chips = [];
-  let targetPoint = null;
-  let destinationPoint = null;
-  let cueIndex = 0;
-
-  cues.forEach((cue) => {
-    const role = String(cue.role || "reference").toLowerCase();
-    const colorName = normalizeColorCategory(cue.color || (role === "target" ? activeTask.color : ""));
-    const colorGroup = colorName ? latestColors.find((item) => item.name.toLowerCase() === colorName) : null;
-    const regions = colorGroup?.regions || [];
-
-    if (regions.length) {
-      regions.slice(0, role === "target" ? 3 : 1).forEach((region, regionIndex) => {
-        const accent = role === "destination" ? "#f4d78c" : "#b9e9cf";
-        drawRegionOutline(region, accent);
-        const point = getRegionCenter(region);
-        chips.push({
-          key: `task-${cueIndex}-${regionIndex}`,
-          label: cue.label || cue.object || colorName,
-          color: colorName,
-          hex: region.hex,
-          point
-        });
-        if (role === "target" && !targetPoint) targetPoint = point;
-        if (role === "destination" && !destinationPoint) destinationPoint = point;
-      });
-    } else {
-      const zoneName = normalizeZone(`${cue.location || ""} ${cue.label || ""}`);
-      const point = cuePoint(cue) || (role === "target" ? { x: canvas.width * .5, y: canvas.height * .48 } : null);
-      if (point) {
-        const center = zoneName && role === "destination"
-          ? drawZoneGuide(zoneName)
-          : drawGuideBoxAt(point, cue.label, role === "destination" ? "#f4d78c" : "#b9e9cf");
-        if (role === "target" && !targetPoint) targetPoint = center;
-        if (role === "destination" && !destinationPoint) destinationPoint = center;
-      }
-      const fallbackPoint = point || { x: canvas.width * .5, y: role === "destination" ? canvas.height * .20 : canvas.height * .36 };
-      const cueLabel = cue.label || cue.object || cue.location || role;
-      chips.push({
-        key: `task-${cueIndex}`,
-        label: role === "target" && !colorName ? `Look for ${cueLabel}` : cueLabel,
-        color: role === "destination" ? "yellow" : colorName,
-        point: fallbackPoint
-      });
-    }
-    cueIndex += 1;
-  });
-
-  if (!cues.length && activeTask.normalizedColor) {
-    const colorGroup = latestColors.find((item) => item.name.toLowerCase() === activeTask.normalizedColor);
-    (colorGroup?.regions || []).slice(0, 3).forEach((region, index) => {
-      drawRegionOutline(region, "#b9e9cf");
-      const point = getRegionCenter(region);
-      if (!targetPoint) targetPoint = point;
-      chips.push({ key: `task-target-${index}`, label: activeTask.color || activeTask.normalizedColor, color: activeTask.normalizedColor, hex: region.hex, point });
-    });
-  }
-
-  const hasExplicitZoneCue = cues.some((cue) =>
-    String(cue.role || "").toLowerCase() === "destination" && normalizeZone(`${cue.location || ""} ${cue.label || ""}`)
-  );
-  if (activeTask.zoneKey && !hasExplicitZoneCue) {
-    const point = drawZoneGuide(activeTask.zoneKey);
-    if (!destinationPoint) destinationPoint = point;
-    chips.push({ key: "task-destination-zone", label: activeTask.zoneKey, color: "yellow", point });
-  }
-
-  if (targetPoint && destinationPoint) drawArrow(targetPoint, destinationPoint);
-  else if (targetPoint) drawArrow({ x: canvas.width * .5, y: canvas.height * .88 }, targetPoint);
-  else if (destinationPoint) drawArrow({ x: canvas.width * .5, y: canvas.height * .50 }, destinationPoint);
-
-  if (!chips.length) {
-    chips.push({ key: "task-summary", label: "Follow the steps", color: "green", point: { x: canvas.width * .5, y: canvas.height * .16 } });
-  }
-  setCameraChips(showColorChips ? chips : []);
-}
-
 toggleCamBtn.addEventListener("click", async () => {
   if (streaming) {
     stopCamera();
@@ -630,7 +501,8 @@ toggleCamBtn.addEventListener("click", async () => {
     toggleCamBtn.classList.add("is-active");
     toggleCamLabel.textContent = "Stop camera";
     colorSelect.disabled = false;
-    taskBtn.disabled = Boolean(activeTask?.completed) || Boolean(activeTask?.canAutoVerify && !streaming);
+    snapshotBtn.disabled = false;
+    refreshGuideStatus();
     cameraPlaceholder.classList.add("is-hidden");
     setCameraStatus("Camera on", "live");
     detectedLayoutSignature = "__reset__";
@@ -674,7 +546,6 @@ function stopCamera() {
   toggleCamLabel.textContent = "Start camera";
   colorSelect.disabled = true;
   sampleFindBtn.disabled = true;
-  taskBtn.disabled = Boolean(activeTask?.completed) || Boolean(activeTask?.canAutoVerify);
 
   cameraPlaceholder.classList.remove("is-hidden");
   sampleIndicator.classList.remove("is-visible", "is-below");
@@ -685,13 +556,19 @@ function stopCamera() {
 
   setCameraStatus("Camera off", "off");
   setFeedback(findResult, "Choose a target to begin.");
-  if (activeTask && !activeTask.completed) {
-    setFeedback(taskResult, activeTask.canAutoVerify ? "Start the camera to check placement." : "Start the camera to show visual cues.");
-  }
+  snapshotBtn.disabled = true;
+  refreshGuideStatus();
+  renderScene();
 }
 
 function processLoop() {
   if (!streaming) return;
+
+  // HueDo shows a still picture instead of the live view.
+  if (showingScene()) {
+    animationFrameId = requestAnimationFrame(processLoop);
+    return;
+  }
 
   try {
     const result = analyzeVideoFrame(video, canvas);
@@ -714,8 +591,13 @@ function processLoop() {
         setCameraChips(chips);
       } else if (currentMode === "find" && targetColor) {
         drawTargetOverlay();
-      } else if (currentMode === "do" && activeTask) {
-        drawTaskGuidance();
+      } else if (currentMode === "do") {
+        setCameraChips([{
+          key: "do-take-picture",
+          label: "📷 Take a picture to use HueDo",
+          color: "yellow",
+          point: { x: canvas.width / 2, y: canvas.height * 0.14 }
+        }]);
       } else {
         setCameraChips([]);
       }
@@ -725,10 +607,6 @@ function processLoop() {
         sampleImagePoint(lastSamplePosition, source);
       }
 
-      if (activeTask?.canAutoVerify && !activeTask.completed && !taskCompletionPending) {
-        taskCheckFrames += 1;
-        if (taskCheckFrames % 5 === 0) verifyTaskFrame();
-      }
     }
   } catch (error) {
     console.error("Camera frame processing error:", error);
@@ -967,6 +845,7 @@ function renderDetectedColors(colors) {
 }
 
 function sampleFromPointer(event) {
+  if (showingScene()) return null;
   const point = getImagePoint(event.clientX, event.clientY);
   if (!point) {
     lastSamplePosition = null;
@@ -1134,108 +1013,307 @@ clearFindBtn.addEventListener("click", () => {
   setFeedback(findResult, "Choose a target to begin.");
 });
 
-// HueDo interprets open-ended instructions and turns supported details into camera cues.
-instructionImageInput.addEventListener("change", () => {
-  const file = instructionImageInput.files?.[0];
-  instructionImage = file || null;
-  instructionFileName.textContent = file ? file.name : "No photo";
+// HueDo works from a still picture (taken with the camera button or uploaded), not the live webcam.
+const SCENE_MAX_WIDTH = 1280;
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Could not read that picture."));
+    image.src = src;
+  });
+}
+
+// Draws any image source to a JPEG no wider than SCENE_MAX_WIDTH and returns a scene picture.
+async function makeScene(source, sourceWidth, sourceHeight, origin, name = "") {
+  const scale = Math.min(1, SCENE_MAX_WIDTH / Math.max(sourceWidth, sourceHeight, 1));
+  const still = document.createElement("canvas");
+  still.width = Math.max(1, Math.round(sourceWidth * scale));
+  still.height = Math.max(1, Math.round(sourceHeight * scale));
+  const stillContext = still.getContext("2d");
+  stillContext.fillStyle = "#fff";
+  stillContext.fillRect(0, 0, still.width, still.height);
+  stillContext.drawImage(source, 0, 0, still.width, still.height);
+  const dataUrl = still.toDataURL("image/jpeg", 0.85);
+  const image = await loadImage(dataUrl);
+  return {
+    mimeType: "image/jpeg",
+    data: dataUrl.split(",")[1],
+    dataUrl,
+    image,
+    width: still.width,
+    height: still.height,
+    origin,
+    name
+  };
+}
+
+function captureCameraScene() {
+  if (!streaming || !video.videoWidth || !video.videoHeight) return Promise.resolve(null);
+  return makeScene(video, video.videoWidth, video.videoHeight, "camera");
+}
+
+async function fileToScene(file) {
+  if (file.type && !file.type.startsWith("image/")) throw new Error("Choose an image file.");
+  const url = URL.createObjectURL(file);
+  try {
+    const image = await loadImage(url);
+    return await makeScene(image, image.naturalWidth, image.naturalHeight, "upload", file.name);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function showingScene() {
+  return currentMode === "do" && Boolean(scenePhoto);
+}
+
+function setScenePhoto(scene, { keepLocations = false } = {}) {
+  scenePhoto = scene;
+  if (!keepLocations) sceneLocations = [];
   instructionImagePreview.replaceChildren();
-
-  if (instructionImageUrl) URL.revokeObjectURL(instructionImageUrl);
-  instructionImageUrl = null;
-
-  if (file) {
-    instructionImageUrl = URL.createObjectURL(file);
+  if (scene) {
     const image = document.createElement("img");
-    image.src = instructionImageUrl;
-    image.alt = "Selected instruction";
+    image.src = scene.dataUrl;
+    image.alt = "Picture HueDo will use";
     instructionImagePreview.append(image);
-    instructionImagePreview.hidden = false;
-  } else {
-    instructionImagePreview.hidden = true;
+  }
+  instructionImagePreview.hidden = !scene;
+  clearSceneBtn.hidden = !scene;
+  instructionFileName.textContent = !scene
+    ? "No picture yet"
+    : scene.origin === "camera" ? "Picture taken with the camera" : scene.name || "Uploaded picture";
+  interpretStatus.classList.remove("is-error");
+  renderScene();
+}
+
+function drawCircleAround(rect, accent) {
+  const centerX = rect.x + rect.width / 2;
+  const centerY = rect.y + rect.height / 2;
+  const radiusX = rect.width / 2 * 1.2 + 6;
+  const radiusY = rect.height / 2 * 1.15 + 6;
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(centerX, centerY, radiusX, radiusY, 0, 0, Math.PI * 2);
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = "rgba(8,16,13,.8)";
+  ctx.stroke();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = accent;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawAreaBox(rect, accent, fill = "") {
+  ctx.save();
+  if (fill) {
+    ctx.fillStyle = fill;
+    ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+  }
+  ctx.setLineDash([4, 5]);
+  ctx.lineWidth = 3.2;
+  ctx.strokeStyle = "rgba(8,16,13,.78)";
+  ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+  ctx.lineWidth = 1.8;
+  ctx.strokeStyle = accent;
+  ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+  ctx.restore();
+}
+
+// Shows the picture in the camera area with circles around what Gemini found.
+function renderScene() {
+  if (!showingScene()) {
+    cameraFrame.classList.remove("is-scene");
+    if (!streaming) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      cameraPlaceholder.classList.remove("is-hidden");
+      if (currentMode === "do") setCameraChips([]);
+    }
+    return;
+  }
+
+  cameraFrame.classList.add("is-scene");
+  cameraPlaceholder.classList.add("is-hidden");
+  sampleIndicator.classList.remove("is-visible");
+  canvas.width = scenePhoto.width;
+  canvas.height = scenePhoto.height;
+  ctx.drawImage(scenePhoto.image, 0, 0, canvas.width, canvas.height);
+
+  // Draw overlays in a 320-wide coordinate space so line widths match the live view.
+  const k = canvas.width / 320;
+  const width = 320;
+  const height = canvas.height / k;
+  const chips = [];
+  let targetCenter = null;
+  let destinationCenter = null;
+
+  ctx.save();
+  ctx.setTransform(k, 0, 0, k, 0, 0);
+  sceneLocations.forEach((location, index) => {
+    const rect = {
+      x: location.box.x * width,
+      y: location.box.y * height,
+      width: location.box.width * width,
+      height: location.box.height * height
+    };
+    const center = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    const done = Boolean(activeTask?.completed);
+    if (location.role === "destination") {
+      drawAreaBox(rect, done ? "#8fe0b0" : "#f4d78c", done ? "rgba(143,224,176,.18)" : "");
+      destinationCenter ??= center;
+    } else {
+      drawCircleAround(rect, location.role === "target" ? "#f5e6a1" : "#b9e9cf");
+      if (location.role === "target") targetCenter ??= center;
+    }
+    chips.push({
+      key: `scene-${index}`,
+      label: location.label || (location.role === "destination" ? "Destination" : "Here"),
+      hex: location.role === "destination" ? "#f4d78c" : "#f5e6a1",
+      point: { x: center.x * k, y: Math.max(0, rect.y - 6) * k }
+    });
+  });
+  if (targetCenter && destinationCenter && currentStep()?.kind === "place" && !activeTask?.completed) {
+    drawArrow(targetCenter, destinationCenter);
+  }
+  ctx.restore();
+
+  setCameraChips(chips);
+}
+
+snapshotBtn.addEventListener("click", async () => {
+  if (!streaming) return;
+  const scene = await captureCameraScene();
+  if (!scene) return;
+  setActiveMode("do");
+  setScenePhoto(scene);
+  setFeedback(interpretStatus, "Picture taken. Now type what you're looking for and press Build visual guide.");
+  speak("Picture taken.");
+});
+
+instructionImageInput.addEventListener("change", async () => {
+  const file = instructionImageInput.files?.[0];
+  instructionImageInput.value = "";
+  if (!file) return;
+  try {
+    setScenePhoto(await fileToScene(file));
+    setFeedback(interpretStatus, "Picture added. Now type what you're looking for and press Build visual guide.");
+  } catch (error) {
+    setFeedback(interpretStatus, error.message);
   }
 });
 
-async function fileToInlineImage(file) {
-  if (file.size > 8 * 1024 * 1024) {
-    throw new Error("Choose an image smaller than 8 MB.");
-  }
-  const dataUrl = await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error("Could not read the selected image."));
-    reader.readAsDataURL(file);
-  });
-  const [header, data] = dataUrl.split(",");
-  const mimeType = header.match(/data:(.*?);base64/)?.[1] || file.type || "image/jpeg";
-  return { mimeType, data };
+clearSceneBtn.addEventListener("click", () => {
+  setScenePhoto(null);
+  setFeedback(interpretStatus, "Picture cleared.");
+});
+
+// --- Steps 2 and 3: show what was understood, let the user fix it and confirm ---
+function readDraftFields() {
+  return {
+    ...(pendingTaskDraft || {}),
+    color: taskColorInput.value.trim().toLowerCase(),
+    object: taskObjectInput.value.trim(),
+    action: taskActionInput.value.trim().toLowerCase(),
+    destination: taskDestinationInput.value.trim()
+  };
 }
 
-function renderTaskDraftPreview(draft) {
+function refreshDraftPreview() {
+  const draft = readDraftFields();
+  const sentence = describeTask(draft) || draft.summary || "";
+  const steps = buildGuideSteps({ ...draft, summary: sentence });
+  taskReadback.textContent = sentence;
+  taskAnswer.textContent = draft.answer || "";
+  taskAnswer.hidden = !draft.answer;
   taskStepsPreview.replaceChildren();
-  (draft.steps || []).forEach((step) => {
+  steps.forEach((step) => {
     const item = document.createElement("li");
-    item.textContent = step;
+    item.textContent = step.text;
     taskStepsPreview.append(item);
   });
-  if (!draft.steps?.length) {
-    const item = document.createElement("li");
-    item.textContent = "Follow the instruction as written.";
-    taskStepsPreview.append(item);
-  }
+  return { draft, sentence, steps };
+}
 
-  taskCuePreview.replaceChildren();
-  (draft.visualCues || []).forEach((cue) => {
-    const pill = document.createElement("span");
-    pill.className = "task-cue-pill";
-    pill.textContent = cue.label || cue.object || cue.role || "Visual cue";
-    pill.style.setProperty("--cue-color", chipColors[String(cue.color || "").toLowerCase()] || "var(--brand)");
-    taskCuePreview.append(pill);
-  });
+function showDraft(draft, sourceNote) {
+  pendingTaskDraft = draft;
+  taskColorInput.value = draft.color || "";
+  taskObjectInput.value = draft.object || "";
+  taskActionInput.value = draft.action || "";
+  taskDestinationInput.value = draft.destination || "";
+  taskSourceNote.textContent = sourceNote;
+  parsedTask.hidden = false;
+  sceneLocations = draft.locations || [];
+  renderScene();
+  const { sentence } = refreshDraftPreview();
+  speak([`I understood: ${sentence}`, draft.answer, "Is that right?"].filter(Boolean).join(" "));
+}
+
+[taskColorInput, taskObjectInput, taskActionInput, taskDestinationInput].forEach((field) => {
+  field.addEventListener("input", refreshDraftPreview);
+});
+
+readTaskBtn.addEventListener("click", () => {
+  const { draft, sentence, steps } = refreshDraftPreview();
+  speak([sentence, draft.answer, ...steps.map((step, index) => `Step ${index + 1}. ${step.text}`)].filter(Boolean).join(" "));
+});
+
+function showInterpretError(message) {
+  setFeedback(interpretStatus, message);
+  interpretStatus.classList.add("is-error");
+  speak(message);
 }
 
 interpretBtn.addEventListener("click", async () => {
   const text = instructionInput.value.trim();
-  if (!text && !instructionImage) {
-    setFeedback(interpretStatus, "Add an instruction or photo first.");
+  interpretStatus.classList.remove("is-error");
+
+  if (!scenePhoto) {
+    showInterpretError(streaming
+      ? "HueDo doesn't work on the live webcam. Press 📷 Take picture on the camera, or upload a picture, then try again."
+      : "HueDo needs a picture. Start the camera and press 📷 Take picture, or upload a picture, then try again.");
+    return;
+  }
+  if (!text) {
+    showInterpretError("Type what you need, for example: Where is the pink pen?");
     return;
   }
 
   interpretBtn.disabled = true;
-  interpretBtn.textContent = "Building guide…";
+  interpretBtn.textContent = "Looking at the picture…";
   setFeedback(interpretStatus, "");
+  setActiveMode("do");
 
   try {
-    const image = instructionImage ? await fileToInlineImage(instructionImage) : null;
-    const result = await interpret(text, image);
-    pendingTaskDraft = {
+    const result = await interpret(text, { mimeType: scenePhoto.mimeType, data: scenePhoto.data });
+    const basic = parseInstruction(text);
+    const target = describeTarget({ color: result.targetColor || basic.color, object: result.targetObject || basic.object });
+    const foundTarget = (result.locations || []).some((location) => location.role === "target");
+    showDraft({
       summary: result.summary || text,
       steps: Array.isArray(result.steps) ? result.steps : [],
       visualCues: Array.isArray(result.visualCues) ? result.visualCues : [],
-      color: result.targetColor || "",
-      object: result.targetObject || "",
-      action: result.action || "",
-      destination: result.destination || ""
-    };
-    taskSummaryInput.value = pendingTaskDraft.summary;
-    renderTaskDraftPreview(pendingTaskDraft);
-    parsedTask.hidden = false;
-    setFeedback(interpretStatus, "Guide ready to review.");
+      color: result.targetColor || basic.color || "",
+      object: result.targetObject || basic.object || "",
+      action: result.action || basic.action || "",
+      destination: result.destination || basic.destination || "",
+      relation: result.relation || basic.relation || "",
+      answer: result.answer || (target && !foundTarget ? `I couldn't find the ${target} in this picture. Try another picture.` : ""),
+      locations: result.locations || []
+    }, "Read by Gemini. Fix anything that's wrong, then start.");
+    setFeedback(interpretStatus, "Check the details below.");
   } catch (error) {
-    const fallbackSummary = text || "Follow the instruction in the attached photo.";
-    pendingTaskDraft = {
-      summary: fallbackSummary,
-      steps: [fallbackSummary],
+    // Without Gemini nothing is circled: guessing by color alone circles faces and lips.
+    const basic = parseInstruction(text);
+    const target = describeTarget(basic);
+    showDraft({
+      ...basic,
+      steps: [],
       visualCues: [],
-      color: "",
-      object: "",
-      action: "",
-      destination: ""
-    };
-    taskSummaryInput.value = fallbackSummary;
-    renderTaskDraftPreview(pendingTaskDraft);
-    parsedTask.hidden = false;
-    setFeedback(interpretStatus, `${error.message} You can still save this as a manual guide.`);
+      locations: [],
+      answer: target ? `I need Gemini to find the ${target} in the picture.` : ""
+    }, "Gemini wasn't available, so I used a basic reading and couldn't look at the picture.");
+    setFeedback(interpretStatus, `Gemini: ${error.message}`);
   } finally {
     interpretBtn.disabled = false;
     interpretBtn.textContent = "Build visual guide";
@@ -1243,107 +1321,275 @@ interpretBtn.addEventListener("click", async () => {
 });
 
 saveTaskBtn.addEventListener("click", async () => {
-  const draft = {
-    ...(pendingTaskDraft || {}),
-    summary: taskSummaryInput.value.trim()
-  };
-
-  if (!draft.summary) {
+  const { draft, sentence, steps } = refreshDraftPreview();
+  if (!sentence) {
     setFeedback(interpretStatus, "Add a short description of the task.");
     return;
   }
 
+  const { locations = [], answer = "", ...rest } = draft;
+  const task = { ...rest, summary: sentence, steps: steps.map((step) => step.text) };
+
   saveTaskBtn.disabled = true;
-  saveTaskBtn.textContent = "Saving…";
+  saveTaskBtn.textContent = "Starting…";
+  let saved = task;
+  let saveNote = "";
   try {
-    const saved = await createTask(draft);
-    setActiveTask(saved);
-    setActiveMode("do");
-    await refreshTaskLibrary();
-    setFeedback(interpretStatus, "Visual guide is ready in the camera view.");
-    speak(draft.summary);
+    saved = await createTask(task);
+    refreshTaskLibrary();
   } catch (error) {
-    setFeedback(interpretStatus, error.message || "Could not save the guide.");
+    console.warn("Could not save guide:", error);
+    saveNote = " (Not saved to HueMemory, but the guide still works.)";
   } finally {
     saveTaskBtn.disabled = false;
-    saveTaskBtn.textContent = "Use this guide";
+    saveTaskBtn.textContent = "Yes, start guide";
   }
+
+  parsedTask.hidden = true;
+  setFeedback(interpretStatus, `Guide started.${saveNote}`);
+  setActiveTask({ ...saved, answer, locations }, { prefix: `Starting: ${sentence}` });
+  setActiveMode("do");
 });
 
-function setActiveTask(task) {
-  const summary = task.summary || task.task || [task.action, task.color, task.object, task.destination].filter(Boolean).join(" ") || "Follow the saved task.";
-  const visualCues = Array.isArray(task.visualCues) ? [...task.visualCues] : [];
-  if (!visualCues.length && task.color) {
-    visualCues.push({
-      label: [task.color, task.object].filter(Boolean).join(" ") || task.color,
-      role: "target",
-      color: task.color,
-      object: task.object || ""
-    });
-  }
-  if (task.destination && !visualCues.some((cue) => String(cue.role || "").toLowerCase() === "destination")) {
-    visualCues.push({
-      label: task.destination,
-      role: "destination",
-      location: task.destination,
-      direction: ""
-    });
-  }
+// --- Steps 4 to 7: the guided task ---
+function currentStep() {
+  return activeTask?.guideSteps?.[guideStepIndex] || null;
+}
 
-  const normalizedColor = normalizeColorCategory(task.targetColor || task.color || visualCues.find((cue) => cue.color)?.color || "");
-  if (normalizedColor && !visualCues.some((cue) => cue.color)) {
-    visualCues.push({ label: task.color || normalizedColor, role: "target", color: task.color || normalizedColor });
-  }
-  const zoneKey = normalizeZone(task.destination || visualCues.find((cue) => String(cue.role || "").toLowerCase() === "destination")?.location || "");
-  activeTask = {
-    ...task,
-    summary,
-    visualCues,
-    normalizedColor,
-    zoneKey,
-    canAutoVerify: Boolean(normalizedColor && zoneKey)
-  };
+function targetLabel() {
+  return describeTarget({ color: activeTask?.color, object: activeTask?.object }) || "target";
+}
 
-  taskSuccessStreak = 0;
+function destinationLabel() {
+  return activeTask?.destination || "the destination";
+}
+
+function setActiveTask(task, { prefix = "" } = {}) {
+  const summary = task.summary || describeTask(task) || "Follow the saved task.";
+  const guideSteps = buildGuideSteps({ ...task, summary });
+
+  activeTask = { ...task, summary, guideSteps, answer: task.answer || "" };
+  sceneLocations = Array.isArray(task.locations) ? task.locations : [];
   taskCompletionPending = false;
-  activeTaskEmpty.hidden = true;
-  activeTaskContent.hidden = false;
-  taskStateMark.textContent = task.completed ? "✓" : "○";
-  taskStateMark.style.color = task.completed ? "var(--success)" : "";
-  activeTaskSummary.textContent = summary;
-  activeTaskSteps.replaceChildren();
-  (Array.isArray(task.steps) ? task.steps : []).forEach((step) => {
-    const item = document.createElement("li");
-    item.textContent = step;
-    activeTaskSteps.append(item);
-  });
-  targetColor = normalizedColor;
+
+  // HueFind can still look for the same color on the live camera.
+  targetColor = normalizeColorName(task.color);
   targetRgb = null;
   targetShade = "";
   colorSelect.value = targetColor;
-  colorSelect.disabled = !streaming;
-  taskBtn.disabled = Boolean(task.completed) || Boolean(activeTask.canAutoVerify && !streaming);
-  taskBtn.textContent = task.completed ? "Completed" : activeTask.canAutoVerify ? "Check placement" : "Mark complete";
-  setFeedback(taskResult, task.completed
-    ? "This guide is complete."
-    : activeTask.canAutoVerify
-      ? "Camera is checking the target color in the named area."
-      : streaming
-        ? "Follow the visual cues, then confirm when finished."
-        : "Start the camera to show visual cues.");
-  if (task.completed) taskStateMark.textContent = "✓";
+
+  activeTaskEmpty.hidden = true;
+  activeTaskContent.hidden = false;
+  activeTaskSummary.textContent = summary;
+  guideDone.hidden = true;
+  guideStepCard.hidden = false;
+  taskStateMark.textContent = "○";
+  taskStateMark.style.color = "";
+
+  if (task.completed) {
+    showCompletion(false, "", false);
+    return;
+  }
+  goToStep(0, { prefix });
+}
+
+function renderGuideSteps() {
+  activeTaskSteps.replaceChildren();
+  activeTask.guideSteps.forEach((step, index) => {
+    const item = document.createElement("li");
+    item.textContent = step.text;
+    const current = !activeTask.completed && index === guideStepIndex;
+    item.classList.toggle("is-done", activeTask.completed || index < guideStepIndex);
+    item.classList.toggle("is-current", current);
+    if (current) item.setAttribute("aria-current", "step");
+    activeTaskSteps.append(item);
+  });
+}
+
+function stepStatusText(step) {
+  if (step.kind === "find") {
+    if (!scenePhoto) return "Take or upload a picture, then press Build visual guide to circle it.";
+    const found = sceneLocations.some((location) => location.role === "target");
+    return activeTask.answer || (found ? `The ${targetLabel()} is circled.` : `I couldn't find the ${targetLabel()} in this picture.`);
+  }
+  if (step.kind === "place") {
+    return streaming
+      ? `When it's done, press "Check with a new picture".`
+      : `Start the camera, then press "Check with a new picture" when it's done.`;
+  }
+  return "Press Next when you're ready.";
+}
+
+function goToStep(index, { prefix = "", announce = true } = {}) {
+  if (!activeTask) return;
+  const steps = activeTask.guideSteps;
+  guideStepIndex = clamp(index, 0, steps.length - 1);
+  const step = steps[guideStepIndex];
+
+  const targetMissing = step.kind === "find" && !sceneLocations.some((location) => location.role === "target");
+  const stepText = targetMissing
+    ? `I couldn't find the ${targetLabel()} in this picture. Take a new picture and press Build visual guide again.`
+    : step.text;
+  guideStepCount.textContent = `Step ${guideStepIndex + 1} of ${steps.length}`;
+  guideStepText.textContent = stepText;
+  checkPictureBtn.hidden = step.kind !== "place";
+  prevStepBtn.disabled = guideStepIndex === 0;
+  taskBtn.disabled = false;
+  taskBtn.textContent = guideStepIndex === steps.length - 1 ? "Done" : "Next";
+  renderGuideSteps();
+  const status = stepStatusText(step);
+  setFeedback(taskResult, status);
+  renderScene();
+
+  if (announce) {
+    const extra = step.kind === "find" ? status : "";
+    speak([prefix, `Step ${guideStepIndex + 1} of ${steps.length}.`, stepText, targetMissing ? "" : extra].filter(Boolean).join(" "));
+  }
+}
+
+function refreshGuideStatus() {
+  if (!activeTask || activeTask.completed) return;
+  const step = currentStep();
+  if (step) setFeedback(taskResult, stepStatusText(step));
+}
+
+checkPictureBtn.addEventListener("click", async () => {
+  if (!activeTask || activeTask.completed) return;
+  if (!streaming) {
+    const message = "Start the camera so I can take the check picture.";
+    setFeedback(taskResult, message);
+    speak(message);
+    return;
+  }
+
+  checkPictureBtn.disabled = true;
+  checkPictureBtn.textContent = "Checking…";
+  try {
+    const scene = await captureCameraScene();
+    setScenePhoto(scene);
+    speak("Checking.");
+    const result = await checkTask({ mimeType: scene.mimeType, data: scene.data }, {
+      summary: activeTask.summary,
+      target: targetLabel(),
+      destination: activeTask.destination || ""
+    });
+    sceneLocations = result.locations || [];
+    if (result.done) {
+      completeActiveTask(true, result.message);
+    } else {
+      renderScene();
+      const message = result.message || `Not done yet. Put the ${targetLabel()} ${normalizeRelation(activeTask.relation)} ${destinationLabel()}, then check again.`;
+      setFeedback(taskResult, message);
+      speak(message);
+    }
+  } catch (error) {
+    const message = `I couldn't check automatically (${error.message}). Press Done when it's finished.`;
+    setFeedback(taskResult, message);
+    speak(message);
+  } finally {
+    checkPictureBtn.disabled = false;
+    checkPictureBtn.textContent = "📷 Check with a new picture";
+  }
+});
+
+prevStepBtn.addEventListener("click", () => {
+  if (activeTask && !activeTask.completed) goToStep(guideStepIndex - 1);
+});
+
+repeatStepBtn.addEventListener("click", () => {
+  if (!activeTask) return;
+  if (activeTask.completed) {
+    speak(guideDoneText.textContent);
+    return;
+  }
+  const step = currentStep();
+  speak(`Step ${guideStepIndex + 1} of ${activeTask.guideSteps.length}. ${step.text} ${taskResult.textContent}`);
+});
+
+taskBtn.addEventListener("click", () => {
+  if (!activeTask || activeTask.completed) return;
+  if (guideStepIndex >= activeTask.guideSteps.length - 1) {
+    completeActiveTask(false);
+    return;
+  }
+  goToStep(guideStepIndex + 1);
+});
+
+function playChime() {
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
+    const audio = new AudioContextClass();
+    [523.25, 659.25, 783.99].forEach((frequency, index) => {
+      const oscillator = audio.createOscillator();
+      const gain = audio.createGain();
+      const start = audio.currentTime + index * 0.14;
+      oscillator.type = "sine";
+      oscillator.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.25, start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.35);
+      oscillator.connect(gain).connect(audio.destination);
+      oscillator.start(start);
+      oscillator.stop(start + 0.4);
+    });
+    window.setTimeout(() => audio.close(), 1200);
+  } catch (error) {
+    console.warn("Chime unavailable:", error);
+  }
+}
+
+function showCompletion(verified, detail = "", announce = true) {
+  activeTask.completed = true;
+  checkPictureBtn.hidden = true;
+  guideStepCard.hidden = true;
+  guideDone.hidden = false;
+  const message = verified
+    ? `Done! ${detail || `The ${targetLabel()} is ${normalizeRelation(activeTask.relation)} ${destinationLabel()}.`}`
+    : "Done! Task marked complete.";
+  guideDoneText.textContent = message;
+  taskStateMark.textContent = "✓";
+  taskStateMark.style.color = "var(--success)";
+  taskBtn.disabled = true;
+  taskBtn.textContent = "Completed";
+  prevStepBtn.disabled = true;
+  setFeedback(taskResult, verified ? "Checked from the picture." : "Completed.");
+  renderGuideSteps();
+  renderScene();
+  if (announce) {
+    playChime();
+    speak(message);
+  }
+}
+
+async function completeActiveTask(verified = false, detail = "") {
+  if (!activeTask || taskCompletionPending) return;
+  taskCompletionPending = true;
+  showCompletion(verified, detail);
+
+  if (activeTask._id) {
+    try {
+      const updated = await completeTask(activeTask._id, true);
+      activeTask = { ...activeTask, ...updated, guideSteps: activeTask.guideSteps };
+      await refreshTaskLibrary();
+    } catch (error) {
+      console.error("Could not persist task completion:", error);
+    }
+  }
 }
 
 function clearActiveTask() {
   activeTask = null;
-  taskSuccessStreak = 0;
+  sceneLocations = [];
   taskCompletionPending = false;
   activeTaskEmpty.hidden = false;
   activeTaskContent.hidden = true;
   taskStateMark.textContent = "○";
+  taskStateMark.style.color = "";
   targetColor = "";
   colorSelect.value = "";
   setCameraChips([]);
+  renderScene();
   setFeedback(findResult, "Choose a target to begin.");
 }
 
@@ -1351,100 +1597,6 @@ clearTaskBtn.addEventListener("click", clearActiveTask);
 
 function capitalize(value = "") {
   return String(value).charAt(0).toUpperCase() + String(value).slice(1);
-}
-
-function sampleColorInDestination() {
-  if (!activeTask?.canAutoVerify || !video.videoWidth || !video.videoHeight) {
-    return { found: false, hits: 0, ratio: 0 };
-  }
-
-  const width = 320;
-  const height = Math.max(1, Math.round(width * video.videoHeight / video.videoWidth));
-  if (samplingCanvas.width !== width || samplingCanvas.height !== height) {
-    samplingCanvas.width = width;
-    samplingCanvas.height = height;
-  }
-  samplingContext.drawImage(video, 0, 0, width, height);
-
-  const zone = getZoneBounds(activeTask.zoneKey);
-  if (!zone) return { found: false, hits: 0, ratio: 0 };
-  const left = clamp(zone.x, 0, width - 1);
-  const top = clamp(zone.y, 0, height - 1);
-  const zoneWidth = clamp(zone.width, 1, width - left);
-  const zoneHeight = clamp(zone.height, 1, height - top);
-  const pixels = samplingContext.getImageData(left, top, zoneWidth, zoneHeight).data;
-
-  let hits = 0;
-  let total = 0;
-  const target = activeTask.normalizedColor;
-  if (!target) return { found: false, hits: 0, ratio: 0 };
-
-  const step = 6;
-  for (let y = 0; y < zoneHeight; y += step) {
-    for (let x = 0; x < zoneWidth; x += step) {
-      const index = (y * zoneWidth + x) * 4;
-      const detected = classifyColor(pixels[index], pixels[index + 1], pixels[index + 2]).name.toLowerCase();
-      if (detected === target) hits += 1;
-      total += 1;
-    }
-  }
-
-  const ratio = total ? hits / total : 0;
-  return { found: hits >= 4 && ratio >= 0.025, hits, ratio };
-}
-
-function verifyTaskFrame() {
-  if (!activeTask?.canAutoVerify) return;
-  const result = sampleColorInDestination();
-  if (result.found) {
-    taskSuccessStreak += 1;
-    setFeedback(taskResult, `Target detected in ${activeTask.zoneKey}. Confirming…`);
-    if (taskSuccessStreak >= 4) completeActiveTask(true);
-  } else {
-    taskSuccessStreak = 0;
-    setFeedback(taskResult, `Looking for ${activeTask.color || activeTask.normalizedColor} in ${activeTask.zoneKey}.`);
-  }
-}
-
-taskBtn.addEventListener("click", () => {
-  if (!activeTask || activeTask.completed) return;
-  if (!activeTask.canAutoVerify) {
-    completeActiveTask(false);
-    return;
-  }
-  if (!streaming) return;
-
-  const result = sampleColorInDestination();
-  if (result.found) {
-    setFeedback(taskResult, `Target found in ${activeTask.zoneKey}. Holding for confirmation…`);
-    speak(`${activeTask.color || activeTask.normalizedColor} detected in ${activeTask.zoneKey}.`);
-  } else {
-    setFeedback(taskResult, `Target not confirmed in ${activeTask.zoneKey}.`);
-    speak(`The target was not confirmed in ${activeTask.zoneKey}.`);
-  }
-});
-
-async function completeActiveTask(cameraVerified = false) {
-  if (!activeTask || taskCompletionPending) return;
-  taskCompletionPending = true;
-  activeTask.completed = true;
-  taskStateMark.textContent = "✓";
-  taskStateMark.style.color = "var(--success)";
-  taskBtn.disabled = true;
-  taskBtn.textContent = "Completed";
-  setFeedback(taskResult, cameraVerified ? "Task verified by the camera." : "Task marked complete.");
-  speak(cameraVerified ? "Task completed and verified." : "Task marked complete.");
-
-  if (activeTask._id) {
-    try {
-      const updated = await completeTask(activeTask._id, true);
-      activeTask = { ...activeTask, ...updated };
-      await refreshTaskLibrary();
-    } catch (error) {
-      console.error("Could not persist task completion:", error);
-      setFeedback(taskResult, "Marked complete here, but could not sync to the saved guides.");
-    }
-  }
 }
 
 async function refreshTaskLibrary() {
@@ -1548,5 +1700,4 @@ refreshTaskLibrary();
 // Revoke the temporary preview URL and stop the camera when the page closes.
 window.addEventListener("pagehide", () => {
   if (streaming) stopCamera();
-  if (instructionImageUrl) URL.revokeObjectURL(instructionImageUrl);
 });

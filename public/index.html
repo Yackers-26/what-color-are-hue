@@ -50,6 +50,10 @@
               <button id="colorChipToggle" class="icon-button" type="button" aria-pressed="true" aria-label="Hide color chips" title="Toggle color chips">
                 <span aria-hidden="true">◉</span>
               </button>
+              <button id="snapshotBtn" class="button camera-button" type="button" disabled aria-label="Take a picture for HueDo">
+                <span aria-hidden="true">📷</span>
+                <span>Take picture</span>
+              </button>
               <button id="toggleCamBtn" class="button camera-button" type="button" aria-pressed="false">
                 <span class="camera-glyph" aria-hidden="true"></span>
                 <span id="toggleCamLabel">Start camera</span>
@@ -159,28 +163,49 @@
 
           <div class="feature-card interpreter-card">
             <label class="field-label" for="instructionInput">What do you need to do?</label>
-            <textarea id="instructionInput" rows="3" placeholder="Anything you need help with…"></textarea>
+            <textarea id="instructionInput" rows="3" placeholder="e.g. Where is the pink pen?"></textarea>
             <div class="upload-row">
-              <label class="file-button" for="instructionImageInput">＋ Add photo</label>
+              <label class="file-button" for="instructionImageInput">＋ Upload picture</label>
               <input id="instructionImageInput" type="file" accept="image/*">
-              <span id="instructionFileName" class="file-name">No photo</span>
+              <span id="instructionFileName" class="file-name">No picture yet</span>
+              <button id="clearSceneBtn" class="text-button" type="button" hidden>Clear picture</button>
             </div>
+            <p class="panel-hint">HueDo works from a picture. Press 📷 Take picture on the camera, or upload one.</p>
             <div id="instructionImagePreview" class="instruction-image-preview" hidden></div>
             <button id="interpretBtn" class="button button-primary full-button" type="button">Build visual guide</button>
             <p id="interpretStatus" class="inline-status" role="status" aria-live="polite"></p>
 
             <div id="parsedTask" class="parsed-task" hidden>
-              <div class="parsed-heading"><h2>Task guide</h2><span class="confirm-mark" aria-hidden="true">✓</span></div>
-              <div class="field-group">
-                <label for="taskSummaryInput">Task</label>
-                <textarea id="taskSummaryInput" rows="2"></textarea>
+              <div class="parsed-heading"><h2>Did I get this right?</h2><span class="confirm-mark" aria-hidden="true">?</span></div>
+              <p id="taskSourceNote" class="task-source-note"></p>
+              <p id="taskReadback" class="task-readback" aria-live="polite"></p>
+              <p id="taskAnswer" class="task-answer" hidden></p>
+              <div class="parsed-fields">
+                <div class="field-group">
+                  <label for="taskColorInput">Color</label>
+                  <input id="taskColorInput" type="text" placeholder="pink">
+                </div>
+                <div class="field-group">
+                  <label for="taskObjectInput">Object</label>
+                  <input id="taskObjectInput" type="text" placeholder="pen">
+                </div>
+                <div class="field-group">
+                  <label for="taskActionInput">Action</label>
+                  <input id="taskActionInput" type="text" placeholder="find">
+                </div>
+                <div class="field-group">
+                  <label for="taskDestinationInput">Destination</label>
+                  <input id="taskDestinationInput" type="text" placeholder="(optional) Box B">
+                </div>
               </div>
               <div class="task-steps-wrap">
                 <p class="field-label">Steps</p>
                 <ol id="taskStepsPreview" class="task-steps-preview"></ol>
               </div>
-              <div id="taskCuePreview" class="task-cue-preview"></div>
-              <button id="saveTaskBtn" class="button button-secondary full-button" type="button">Use this guide</button>
+              <div class="confirm-actions">
+                <button id="readTaskBtn" class="button button-secondary" type="button">🔊 Read to me</button>
+                <button id="saveTaskBtn" class="button button-primary" type="button">Yes, start guide</button>
+              </div>
             </div>
           </div>
 
@@ -189,9 +214,22 @@
             <div id="activeTaskEmpty" class="task-empty"><p>No active guide</p></div>
             <div id="activeTaskContent" hidden>
               <p id="activeTaskSummary" class="active-task-summary"></p>
-              <ol id="activeTaskSteps" class="task-steps-preview"></ol>
+              <div id="guideStepCard" class="guide-step-card">
+                <p id="guideStepCount" class="guide-step-count">Step 1 of 1</p>
+                <p id="guideStepText" class="guide-step-text"></p>
+                <button id="checkPictureBtn" class="button button-secondary full-button check-picture-button" type="button" hidden>📷 Check with a new picture</button>
+              </div>
+              <div id="guideDone" class="guide-done" hidden>
+                <span class="guide-done-symbol" aria-hidden="true">✓</span>
+                <p id="guideDoneText" class="guide-done-text">Task complete</p>
+              </div>
+              <ol id="activeTaskSteps" class="task-steps-preview guide-steps"></ol>
               <p id="taskResult" class="task-result" role="status" aria-live="polite">Start the camera to follow the guide.</p>
-              <button id="taskBtn" class="button button-primary full-button" type="button" disabled>Mark complete</button>
+              <div class="guide-controls">
+                <button id="prevStepBtn" class="button button-quiet" type="button">Back</button>
+                <button id="repeatStepBtn" class="button button-secondary" type="button">🔊 Repeat</button>
+                <button id="taskBtn" class="button button-primary" type="button">Next</button>
+              </div>
               <button id="clearTaskBtn" class="text-button" type="button">Clear guide</button>
             </div>
           </div>
