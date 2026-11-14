@@ -1,8 +1,223 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-<head><meta charset="utf-8"><title>WhatColorAreHue</title></head>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#111916">
+  <meta name="description" content="An accessible camera workspace for identifying colors, finding objects, and completing color-based activities.">
+  <title>WhatColorAreHue</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
 <body>
-  <h1>WhatColorAreHue</h1>
-  <p>Server is running. Frontend pages go in /public.</p>
+  <a class="skip-link" href="#workspace">Skip to workspace</a>
+
+  <header class="site-header">
+    <a class="brand" href="#workspace" aria-label="WhatColorAreHue home">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span>WhatColorAreHue</span>
+    </a>
+    <div class="header-actions" aria-label="Accessibility preferences">
+      <button id="contrastToggle" class="utility-button" type="button" aria-pressed="false" aria-label="Toggle high contrast">
+        <span aria-hidden="true">◐</span><span>High contrast</span>
+      </button>
+      <button id="textSizeToggle" class="utility-button" type="button" aria-pressed="false" aria-label="Toggle larger text">
+        <span aria-hidden="true">A+</span><span>Text</span>
+      </button>
+    </div>
+  </header>
+
+  <main id="workspace" class="app-shell">
+    <div class="workspace-grid">
+      <section class="camera-column" aria-label="Live camera workspace">
+        <div class="camera-stage" id="cameraFrame">
+          <video id="webcam" class="camera-source" autoplay playsinline muted aria-hidden="true"></video>
+          <canvas
+            id="outputCanvas"
+            tabindex="0"
+            role="group"
+            aria-label="Live camera color sampler. Move the pointer over the image to inspect a color. On a touchscreen, press and drag. Use arrow keys to move the sample point, then press Enter or Space to hear the color details. Hold Shift while using an arrow key to move farther."
+            aria-describedby="sampleInstructions"
+          ></canvas>
+
+          <div id="cameraChipLayer" class="camera-chip-layer" aria-hidden="true"></div>
+
+          <div class="camera-topbar">
+            <span id="cameraStatus" class="camera-status" role="status" aria-live="polite">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span id="cameraStatusText">Camera off</span>
+            </span>
+            <div class="camera-top-actions">
+              <button id="colorChipToggle" class="icon-button" type="button" aria-pressed="true" aria-label="Hide color chips" title="Toggle color chips">
+                <span aria-hidden="true">◉</span>
+              </button>
+              <button id="toggleCamBtn" class="button camera-button" type="button" aria-pressed="false">
+                <span class="camera-glyph" aria-hidden="true"></span>
+                <span id="toggleCamLabel">Start camera</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="sampleIndicator" class="sample-indicator" aria-hidden="true">
+            <span id="sampleSwatch" class="sample-swatch"></span>
+            <span id="sampleName">Color</span>
+          </div>
+
+          <div id="cameraPlaceholder" class="camera-placeholder">
+            <div class="placeholder-art" aria-hidden="true"><span></span><span></span><span></span></div>
+            <p>Camera off</p>
+          </div>
+
+          <div id="modePreview" class="mode-preview" aria-live="polite">Identify colors in your camera view.</div>
+          <nav class="mode-switcher" role="tablist" aria-label="Choose a mode">
+            <button class="mode-button is-active" id="modeSeeBtn" type="button" role="tab" aria-selected="true" aria-controls="huesee" data-mode-button="see">
+              <span class="mode-icon" aria-hidden="true">◉</span><span>HueSee</span>
+            </button>
+            <button class="mode-button" id="modeFindBtn" type="button" role="tab" aria-selected="false" aria-controls="huefind" data-mode-button="find">
+              <span class="mode-icon" aria-hidden="true">⌖</span><span>HueFind</span>
+            </button>
+            <button class="mode-button" id="modeDoBtn" type="button" role="tab" aria-selected="false" aria-controls="huedo" data-mode-button="do">
+              <span class="mode-icon" aria-hidden="true">✳</span><span>HueDo</span>
+            </button>
+            <button class="mode-button" id="modeMemoryBtn" type="button" role="tab" aria-selected="false" aria-controls="huememory" data-mode-button="memory">
+              <span class="mode-icon" aria-hidden="true">▦</span><span>HueMemory</span>
+            </button>
+          </nav>
+        </div>
+        <p id="sampleInstructions" class="sr-only">Hover, tap, or use arrow keys to sample a color.</p>
+      </section>
+
+      <aside class="mode-panel" aria-label="Mode controls and color information">
+        <section id="huesee" class="mode-view is-active" role="tabpanel" aria-labelledby="modeSeeBtn" data-mode-panel="see">
+          <div class="panel-heading">
+            <div>
+              <p class="panel-kicker">HUESEE</p>
+              <h1>Color details</h1>
+            </div>
+            <span class="panel-live-mark" aria-hidden="true"></span>
+          </div>
+
+          <div class="selected-color">
+            <div id="colorPreview" class="color-preview" aria-hidden="true"></div>
+            <div class="selected-color-copy">
+              <p class="selected-label">IDENTIFIED AS</p>
+              <p id="colorName" class="selected-color-name">No sample yet</p>
+              <p id="colorDescription" class="selected-color-description">Tap the camera view to sample.</p>
+            </div>
+          </div>
+
+          <dl class="color-values">
+            <div class="value-row"><dt>HEX</dt><dd id="colorHex">—</dd></div>
+            <div class="value-row"><dt>RGB</dt><dd id="colorRgb">—</dd></div>
+            <div class="value-row"><dt>HSL</dt><dd id="colorHsl">—</dd></div>
+          </dl>
+
+          <div class="panel-actions">
+            <button id="speakDetailsBtn" class="button button-secondary" type="button" disabled>Speak</button>
+            <button id="saveColorBtn" class="button button-primary" type="button" disabled>Save color</button>
+          </div>
+          <p id="saveColorStatus" class="inline-status" role="status" aria-live="polite"></p>
+
+          <div class="detected-section">
+            <div class="subsection-heading"><h2>Colors in view</h2><span class="live-tag">LIVE</span></div>
+            <ul id="detectedColors" class="detected-color-list">
+              <li class="detected-empty">Start the camera to scan.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section id="huefind" class="mode-view" role="tabpanel" aria-labelledby="modeFindBtn" data-mode-panel="find" hidden>
+          <div class="panel-heading">
+            <div><p class="panel-kicker">HUEFIND</p><h1>Find a color</h1></div>
+            <span class="panel-live-mark" aria-hidden="true"></span>
+          </div>
+          <div class="find-controls">
+            <div class="field-group">
+              <label for="colorSelect">Target color</label>
+              <select id="colorSelect" disabled>
+                <option value="">Choose a color</option>
+                <option value="Red">Red</option><option value="Orange">Orange</option>
+                <option value="Yellow">Yellow</option><option value="Green">Green</option>
+                <option value="Cyan">Cyan</option><option value="Blue">Blue</option>
+                <option value="Purple">Purple</option><option value="Black">Black</option>
+              </select>
+            </div>
+            <button id="sampleFindBtn" class="button button-secondary full-button" type="button" disabled>Find sampled color</button>
+            <button id="clearFindBtn" class="text-button" type="button">Clear target</button>
+          </div>
+          <div class="find-feedback">
+            <span class="feedback-icon" aria-hidden="true">⌖</span>
+            <p id="findResult" role="status" aria-live="polite">Choose a target to begin.</p>
+          </div>
+          <p class="panel-hint">Matching areas are outlined in the camera view.</p>
+        </section>
+
+        <section id="huedo" class="mode-view" role="tabpanel" aria-labelledby="modeDoBtn" data-mode-panel="do" hidden>
+          <div class="panel-heading">
+            <div><p class="panel-kicker">HUEDO</p><h1>Guided task</h1></div>
+            <span class="gemini-mark" aria-hidden="true">✳</span>
+          </div>
+
+          <div class="feature-card interpreter-card">
+            <label class="field-label" for="instructionInput">What do you need to do?</label>
+            <textarea id="instructionInput" rows="3" placeholder="Anything you need help with…"></textarea>
+            <div class="upload-row">
+              <label class="file-button" for="instructionImageInput">＋ Add photo</label>
+              <input id="instructionImageInput" type="file" accept="image/*">
+              <span id="instructionFileName" class="file-name">No photo</span>
+            </div>
+            <div id="instructionImagePreview" class="instruction-image-preview" hidden></div>
+            <button id="interpretBtn" class="button button-primary full-button" type="button">Build visual guide</button>
+            <p id="interpretStatus" class="inline-status" role="status" aria-live="polite"></p>
+
+            <div id="parsedTask" class="parsed-task" hidden>
+              <div class="parsed-heading"><h2>Task guide</h2><span class="confirm-mark" aria-hidden="true">✓</span></div>
+              <div class="field-group">
+                <label for="taskSummaryInput">Task</label>
+                <textarea id="taskSummaryInput" rows="2"></textarea>
+              </div>
+              <div class="task-steps-wrap">
+                <p class="field-label">Steps</p>
+                <ol id="taskStepsPreview" class="task-steps-preview"></ol>
+              </div>
+              <div id="taskCuePreview" class="task-cue-preview"></div>
+              <button id="saveTaskBtn" class="button button-secondary full-button" type="button">Use this guide</button>
+            </div>
+          </div>
+
+          <div class="active-task-card">
+            <div class="subsection-heading"><h2>Current guide</h2><span id="taskStateMark" class="task-state-mark" aria-hidden="true">○</span></div>
+            <div id="activeTaskEmpty" class="task-empty"><p>No active guide</p></div>
+            <div id="activeTaskContent" hidden>
+              <p id="activeTaskSummary" class="active-task-summary"></p>
+              <ol id="activeTaskSteps" class="task-steps-preview"></ol>
+              <p id="taskResult" class="task-result" role="status" aria-live="polite">Start the camera to follow the guide.</p>
+              <button id="taskBtn" class="button button-primary full-button" type="button" disabled>Mark complete</button>
+              <button id="clearTaskBtn" class="text-button" type="button">Clear guide</button>
+            </div>
+          </div>
+
+          <div class="task-library-card">
+            <div class="subsection-heading"><h2>Saved guides</h2><button id="refreshTasksBtn" class="text-button" type="button">Refresh</button></div>
+            <div id="taskLibrary" class="task-library"><p class="library-empty">No saved guides yet.</p></div>
+          </div>
+        </section>
+
+        <section id="huememory" class="mode-view" role="tabpanel" aria-labelledby="modeMemoryBtn" data-mode-panel="memory" hidden>
+          <div class="panel-heading">
+            <div><p class="panel-kicker">HUEMEMORY</p><h1>Saved colors</h1></div>
+            <span class="panel-live-mark" aria-hidden="true"></span>
+          </div>
+          <div id="palette" class="palette-mount"></div>
+          <div class="feature-card image-picker-card">
+            <div class="subsection-heading"><h2>Pick from a photo</h2></div>
+            <div id="image-picker"></div>
+          </div>
+        </section>
+      </aside>
+    </div>
+  </main>
+
+  <div id="audioAnnouncement" class="sr-only" aria-live="assertive" aria-atomic="true"></div>
+  <script type="module" src="/script.js"></script>
 </body>
 </html>

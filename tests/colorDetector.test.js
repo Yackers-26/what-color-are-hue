@@ -63,3 +63,26 @@ test("ignores a completely white image", () => {
 
   assert.equal(results.length, 0);
 });
+// Test 4: Keep separate objects as separate camera regions.
+test("separates disconnected regions of the same color", () => {
+  const width = 40;
+  const height = 20;
+  const data = new Uint8ClampedArray(width * height * 4);
+  for (let i = 0; i < data.length; i += 4) data.set([255, 255, 255, 255], i);
+
+  for (let y = 4; y < 16; y += 1) {
+    for (let x = 2; x < 14; x += 1) {
+      data.set([255, 0, 0, 255], (y * width + x) * 4);
+    }
+    for (let x = 26; x < 38; x += 1) {
+      data.set([255, 0, 0, 255], (y * width + x) * 4);
+    }
+  }
+
+  const results = summarizeFrameColors({ data, width, height });
+  const red = results.find((color) => color.name === "Red");
+
+  assert.ok(red);
+  assert.equal(red.regions.length, 2);
+  assert.ok(red.regions.every((region) => region.outline.length > 0));
+});

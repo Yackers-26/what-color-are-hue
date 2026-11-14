@@ -1,30 +1,31 @@
-// "Add a color from an image". Pick an image, click (or use arrow keys + Enter on)
-// a spot, preview the color, then save it to the HueMemory palette.
-//   import { mountImagePicker } from "/js/imagePicker.js";
-//   mountImagePicker(document.getElementById("image-picker"));
-
 import { classifyColor } from "/src/vision/colorDetector.js";
 import { saveColor } from "./huememory.js";
 
 const STYLE_ID = "huememory-picker-styles";
 const STYLES = `
-.hm-picker { font-family: system-ui, sans-serif; max-width: 640px; color: #111; background: #fff;
-  border: 2px solid #222; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
-.hm-picker h2 { margin: 0 0 8px; font-size: 1.4rem; }
-.hm-picker canvas { display: block; max-width: 100%; margin-top: 12px; cursor: crosshair; border: 1px solid #555; }
-.hm-picker canvas:focus-visible { outline: 3px solid #0057d9; outline-offset: 2px; }
-.hm-picker .hm-pick-row { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
-.hm-picker .hm-swatch { width: 48px; height: 48px; border-radius: 8px; border: 2px solid #000; }
-.hm-picker button, .hm-picker input { font: inherit; font-size: 1rem; }
-.hm-picker button { padding: 8px 14px; min-height: 44px; border-radius: 8px; border: 2px solid #111;
-  background: #111; color: #fff; cursor: pointer; }
-.hm-picker button:disabled { opacity: 0.5; cursor: default; }
-.hm-picker button:focus-visible, .hm-picker input:focus-visible { outline: 3px solid #0057d9; outline-offset: 2px; }
-.hm-picker [hidden] { display: none; }
+.hm-picker { color:var(--ink,#20252a); }
+.hm-picker h4 { margin:0 0 10px; color:var(--muted,#667078); font-size:10px; font-weight:800; }
+.hm-picker .hm-file { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+.hm-picker input[type=file] { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0); }
+.hm-picker .hm-choose { display:inline-flex; min-height:36px; align-items:center; padding:7px 11px; border:1px solid var(--line,#e4e1d9);
+  border-radius:9px; background:var(--surface-soft,#f8f7f2); color:var(--brand,#344e4a); cursor:pointer; font-size:10px; font-weight:800; }
+.hm-picker .hm-canvas { display:block; width:100%; max-height:280px; margin-top:12px; border:1px solid var(--line,#e4e1d9);
+  border-radius:12px; background:#182321; object-fit:contain; cursor:crosshair; touch-action:pan-y; }
+.hm-picker .hm-canvas:focus-visible { outline:3px solid var(--focus,#b65c36); outline-offset:3px; }
+.hm-picker .hm-picked-row { display:flex; align-items:center; gap:10px; margin-top:12px; }
+.hm-picker .hm-swatch { width:38px; height:38px; flex:0 0 38px; border:1px solid rgba(0,0,0,.18); border-radius:10px; }
+.hm-picker .hm-picked-copy { min-width:0; flex:1; }
+.hm-picker .hm-picked-name { color:var(--ink,#20252a); font-size:11px; font-weight:800; }
+.hm-picker .hm-picked-hex { color:var(--muted,#667078); font:10px ui-monospace,monospace; }
+.hm-picker .hm-save { min-height:36px; padding:7px 11px; border:0; border-radius:9px; background:var(--brand,#344e4a);
+  color:#fff; cursor:pointer; font-size:10px; font-weight:800; }
+.hm-picker button:disabled { opacity:.45; cursor:not-allowed; }
+.hm-picker .hm-status { min-height:1.2em; margin:9px 0 0; color:var(--muted,#667078); font-size:10px; }
+.hm-picker [hidden] { display:none !important; }
 `;
 
-const SAMPLE = 5; // average a 5x5 area so one noisy pixel doesn't decide the color
-const STEP = 10;  // arrow keys move the marker this many pixels
+const SAMPLE = 5;
+const STEP = 10;
 
 function addStylesOnce() {
   if (document.getElementById(STYLE_ID)) return;
@@ -34,33 +35,41 @@ function addStylesOnce() {
   document.head.appendChild(style);
 }
 
-export function mountImagePicker(container, { title = "Add a color from an image", onSaved } = {}) {
+export function mountImagePicker(container, { title = "Pick a color", onSaved } = {}) {
   addStylesOnce();
 
-  const id = Math.random().toString(36).slice(2, 8);
+  const id = `hm-pick-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2, 8)}`;
   container.innerHTML = `
-    <section class="hm-picker" aria-labelledby="hm-pick-title-${id}">
-      <h2 id="hm-pick-title-${id}">${title}</h2>
-      <label for="hm-file-${id}">Choose an image:</label>
-      <input id="hm-file-${id}" type="file" accept="image/*">
-      <p id="hm-help-${id}" hidden>Click the spot you want, or focus the image and use the arrow keys, then press Enter.</p>
-      <canvas tabindex="0" hidden role="img" aria-describedby="hm-help-${id}"></canvas>
-      <div class="hm-pick-row" hidden>
-        <div class="hm-swatch" aria-hidden="true"></div>
-        <span class="hm-picked"></span>
-        <button type="button">Save to palette</button>
+    <section class="hm-picker" aria-labelledby="${id}-title">
+      <h4 id="${id}-title">${title}</h4>
+      <div class="hm-file">
+        <label class="hm-choose" for="${id}-file">Choose image</label>
+        <input id="${id}-file" type="file" accept="image/*">
+        <span class="hm-file-name" aria-live="polite">No image selected</span>
+      </div>
+      <p class="hm-help" hidden>Choose a point in the image. Use arrow keys for precise sampling.</p>
+      <canvas class="hm-canvas" tabindex="0" hidden></canvas>
+      <div class="hm-picked-row" hidden>
+        <span class="hm-swatch" aria-hidden="true"></span>
+        <span class="hm-picked-copy">
+          <span class="hm-picked-name"></span><br>
+          <span class="hm-picked-hex"></span>
+        </span>
+        <button class="hm-save" type="button" disabled>Save color</button>
       </div>
       <p class="hm-status" role="status" aria-live="polite"></p>
     </section>`;
 
-  const fileInput = container.querySelector("input");
-  const help = container.querySelector(`#hm-help-${id}`);
+  const fileInput = container.querySelector("input[type=file]");
+  const fileName = container.querySelector(".hm-file-name");
+  const help = container.querySelector(".hm-help");
   const canvas = container.querySelector("canvas");
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  const row = container.querySelector(".hm-pick-row");
+  const row = container.querySelector(".hm-picked-row");
   const swatch = row.querySelector(".hm-swatch");
-  const pickedText = row.querySelector(".hm-picked");
-  const saveButton = row.querySelector("button");
+  const pickedName = row.querySelector(".hm-picked-name");
+  const pickedHex = row.querySelector(".hm-picked-hex");
+  const saveButton = row.querySelector(".hm-save");
   const status = container.querySelector(".hm-status");
 
   let image = null;
@@ -68,10 +77,11 @@ export function mountImagePicker(container, { title = "Add a color from an image
   let picked = null;
 
   function draw() {
+    if (!image) return;
     ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
     if (!picked) return;
-    // Black-and-white ring so the marker shows up on any color.
-    for (const [color, radius] of [["#000", 9], ["#fff", 7]]) {
+
+    for (const [color, radius] of [["#111", 9], ["#fff", 7]]) {
       ctx.beginPath();
       ctx.arc(marker.x, marker.y, radius, 0, Math.PI * 2);
       ctx.strokeStyle = color;
@@ -81,29 +91,32 @@ export function mountImagePicker(container, { title = "Add a color from an image
   }
 
   function pickAt(x, y) {
+    if (!image) return;
     marker = {
       x: Math.max(0, Math.min(canvas.width - 1, Math.round(x))),
       y: Math.max(0, Math.min(canvas.height - 1, Math.round(y)))
     };
 
-    // Read pixels from the clean image (redraw without the marker first).
     ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
     const half = Math.floor(SAMPLE / 2);
-    const sx = Math.max(0, marker.x - half);
-    const sy = Math.max(0, marker.y - half);
-    const { data } = ctx.getImageData(sx, sy, SAMPLE, SAMPLE);
+    const sx = Math.max(0, Math.min(canvas.width - 1, marker.x - half));
+    const sy = Math.max(0, Math.min(canvas.height - 1, marker.y - half));
+    const sw = Math.min(SAMPLE, canvas.width - sx);
+    const sh = Math.min(SAMPLE, canvas.height - sy);
+    const { data } = ctx.getImageData(sx, sy, sw, sh);
 
     let r = 0, g = 0, b = 0, count = 0;
     for (let i = 0; i < data.length; i += 4) {
       if (data[i + 3] < 128) continue;
       r += data[i]; g += data[i + 1]; b += data[i + 2]; count++;
     }
-    if (count === 0) return;
+    if (!count) return;
 
     picked = classifyColor(Math.round(r / count), Math.round(g / count), Math.round(b / count));
     swatch.style.background = picked.hex;
-    pickedText.textContent = `${picked.name} (${picked.hex})`;
-    canvas.setAttribute("aria-label", `Image. Selected color: ${picked.name}, ${picked.hex}`);
+    pickedName.textContent = picked.name;
+    pickedHex.textContent = picked.hex;
+    canvas.setAttribute("aria-label", `Image color sampler. Selected ${picked.name}, ${picked.hex}. Use arrow keys to move.`);
     row.hidden = false;
     saveButton.disabled = false;
     status.textContent = `Selected ${picked.name}.`;
@@ -113,39 +126,64 @@ export function mountImagePicker(container, { title = "Add a color from an image
   fileInput.addEventListener("change", () => {
     const file = fileInput.files?.[0];
     if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      status.textContent = "Choose an image file.";
+      return;
+    }
 
+    fileName.textContent = file.name;
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => {
-      // Shrink big photos so they fit; picking still uses the shown pixels.
-      const scale = Math.min(1, 600 / img.width);
-      canvas.width = Math.round(img.width * scale);
-      canvas.height = Math.round(img.height * scale);
+      const scale = Math.min(1, 720 / img.width, 420 / img.height);
+      canvas.width = Math.max(1, Math.round(img.width * scale));
+      canvas.height = Math.max(1, Math.round(img.height * scale));
       image = img;
       picked = null;
       row.hidden = true;
       canvas.hidden = false;
       help.hidden = false;
-      canvas.setAttribute("aria-label", "Image. No color selected yet.");
+      canvas.setAttribute("aria-label", "Image color sampler. No color selected.");
       draw();
       URL.revokeObjectURL(url);
-      pickAt(canvas.width / 2, canvas.height / 2); // start in the middle
+      pickAt(canvas.width / 2, canvas.height / 2);
       canvas.focus();
     };
-    img.onerror = () => { status.textContent = "Could not open that image."; };
+    img.onerror = () => {
+      status.textContent = "Could not open that image.";
+      URL.revokeObjectURL(url);
+    };
     img.src = url;
   });
 
-  canvas.addEventListener("click", (event) => {
+  function getPoint(event) {
     const rect = canvas.getBoundingClientRect();
-    pickAt(
-      (event.clientX - rect.left) * (canvas.width / rect.width),
-      (event.clientY - rect.top) * (canvas.height / rect.height)
-    );
+    if (!rect.width || !rect.height) return null;
+    return {
+      x: (event.clientX - rect.left) * (canvas.width / rect.width),
+      y: (event.clientY - rect.top) * (canvas.height / rect.height)
+    };
+  }
+
+  canvas.addEventListener("pointerdown", (event) => {
+    const point = getPoint(event);
+    if (!point) return;
+    if (event.pointerType !== "mouse") event.preventDefault();
+    if (canvas.setPointerCapture) canvas.setPointerCapture(event.pointerId);
+    pickAt(point.x, point.y);
+  });
+
+  canvas.addEventListener("pointermove", (event) => {
+    if (event.pointerType === "mouse" && event.buttons === 0) return;
+    const point = getPoint(event);
+    if (point) pickAt(point.x, point.y);
   });
 
   canvas.addEventListener("keydown", (event) => {
-    const moves = { ArrowLeft: [-STEP, 0], ArrowRight: [STEP, 0], ArrowUp: [0, -STEP], ArrowDown: [0, STEP] };
+    const moves = {
+      ArrowLeft: [-STEP, 0], ArrowRight: [STEP, 0],
+      ArrowUp: [0, -STEP], ArrowDown: [0, STEP]
+    };
     if (moves[event.key]) {
       event.preventDefault();
       pickAt(marker.x + moves[event.key][0], marker.y + moves[event.key][1]);
@@ -159,11 +197,11 @@ export function mountImagePicker(container, { title = "Add a color from an image
     if (!picked) return;
     saveButton.disabled = true;
     try {
-      const saved = await saveColor(picked); // the palette panel refreshes by itself
-      status.textContent = `Saved ${picked.name} to your palette.`;
-      onSaved?.(saved);
-    } catch (err) {
-      status.textContent = `Could not save: ${err.message}`;
+      await saveColor(picked);
+      status.textContent = `${picked.name} saved to HueMemory.`;
+      onSaved?.(picked);
+    } catch (error) {
+      status.textContent = `Could not save: ${error.message}`;
     } finally {
       saveButton.disabled = false;
     }
