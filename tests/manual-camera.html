@@ -1,0 +1,92 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HueSee Camera Test</title>
+</head>
+<body>
+  <h1>HueSee Camera Test</h1>
+
+  <button id="startButton">Start Camera</button>
+  <button id="stopButton">Stop Camera</button>
+
+  <p id="status">Camera not started.</p>
+
+  <video
+    id="video"
+    autoplay
+    muted
+    playsinline
+    width="480"
+    style="max-width: 100%;"
+  ></video>
+
+  <canvas id="canvas" hidden></canvas>
+
+  <h2>Detected Colors:</h2>
+  <pre id="results" aria-live="polite">None yet.</pre>
+
+  <script type="module">
+    import { analyzeVideoFrame } from
+      "../src/vision/cameraProcessor.js";
+
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const results = document.getElementById("results");
+    const status = document.getElementById("status");
+
+    let stream = null;
+    let interval = null;
+
+    document.getElementById("startButton").onclick =
+      async () => {
+        try {
+          if (interval) clearInterval(interval);
+          if (stream) {
+            stream.getTracks().forEach(track => track.stop());
+          }
+
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: "environment" },
+            audio: false
+          });
+
+          video.srcObject = stream;
+          await video.play();
+
+          status.textContent = "Camera running!";
+
+          interval = setInterval(() => {
+            const result = analyzeVideoFrame(video, canvas);
+
+            if (result.ready) {
+              results.textContent = result.colors
+                .slice(0, 5)
+                .map(color => color.name)
+                .join(", ") || "No colors detected";
+            }
+          }, 300);
+
+        } catch (error) {
+          status.textContent = "Error: " + error.message;
+        }
+      };
+
+    document.getElementById("stopButton").onclick =
+      () => {
+        if (interval) clearInterval(interval);
+        interval = null;
+
+        if (stream) {
+          stream.getTracks().forEach(track => track.stop());
+        }
+
+        stream = null;
+        video.srcObject = null;
+        status.textContent = "Camera stopped.";
+      };
+  </script>
+</body>
+</html>
