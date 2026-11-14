@@ -87,7 +87,32 @@ export function completeTask(id, completed = true) {
   });
 }
 
-// Gemini: turn "put my red shirt in the blue bin" into { color, object, action, destination }.
-export function interpret(text) {
-  return request("/api/interpret", { method: "POST", body: JSON.stringify({ text }) });
+// Gemini: turn instructions into tasks.
+// interpret("Put the red marker in container A")
+// interpret({ image: dataUrl })  or  interpret({ text, image })
+// Returns { tasks: [{ color, object, action, destination }], summary }.
+export function interpret(input) {
+  const body = typeof input === "string" ? { text: input } : input;
+  return request("/api/interpret", { method: "POST", body: JSON.stringify(body) });
+}
+
+// Shrink a photo (File/Blob from <input type="file">, a <video>, or a <canvas>)
+// to a JPEG data URL so it uploads quickly. Use for interpret({ image }).
+export async function photoToDataUrl(source, maxSize = 1024) {
+  let drawable = source;
+  let width = source.videoWidth || source.width;
+  let height = source.videoHeight || source.height;
+
+  if (source instanceof Blob) {
+    drawable = await createImageBitmap(source);
+    width = drawable.width;
+    height = drawable.height;
+  }
+
+  const scale = Math.min(1, maxSize / Math.max(width, height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(width * scale);
+  canvas.height = Math.round(height * scale);
+  canvas.getContext("2d").drawImage(drawable, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.85);
 }

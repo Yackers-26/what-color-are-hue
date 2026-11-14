@@ -13,7 +13,8 @@ const rootDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
+// 10mb so photos (base64) fit in a request.
+app.use(express.json({ limit: "10mb" }));
 
 // Frontend: put index.html etc. in /public. /src is served so the browser can import src/vision modules.
 app.use(express.static(path.join(rootDir, "public")));
