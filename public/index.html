@@ -3,17 +3,18 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#111916">
-  <meta name="description" content="An accessible camera workspace for identifying colors, finding objects, and completing color-based activities.">
+  <meta name="theme-color" content="#f5f1e8">
+  <meta name="description" content="A camera-first workspace for identifying, finding, and using colors.">
   <title>WhatColorAreHue</title>
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/editorial.css">
 </head>
 <body>
   <a class="skip-link" href="#workspace">Skip to workspace</a>
 
   <header class="site-header">
     <a class="brand" href="#workspace" aria-label="WhatColorAreHue home">
-      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
       <span>WhatColorAreHue</span>
     </a>
     <div class="header-actions" aria-label="Accessibility preferences">
@@ -67,7 +68,6 @@
             <p>Camera off</p>
           </div>
 
-          <div id="modePreview" class="mode-preview" aria-live="polite">Identify colors in your camera view.</div>
           <nav class="mode-switcher" role="tablist" aria-label="Choose a mode">
             <button class="mode-button is-active" id="modeSeeBtn" type="button" role="tab" aria-selected="true" aria-controls="huesee" data-mode-button="see">
               <span class="mode-icon" aria-hidden="true">◉</span><span>HueSee</span>
@@ -101,7 +101,6 @@
             <div class="selected-color-copy">
               <p class="selected-label">IDENTIFIED AS</p>
               <p id="colorName" class="selected-color-name">No sample yet</p>
-              <p id="colorDescription" class="selected-color-description">Tap the camera view to sample.</p>
             </div>
           </div>
 
@@ -148,7 +147,6 @@
             <span class="feedback-icon" aria-hidden="true">⌖</span>
             <p id="findResult" role="status" aria-live="polite">Choose a target to begin.</p>
           </div>
-          <p class="panel-hint">Matching areas are outlined in the camera view.</p>
         </section>
 
         <section id="huedo" class="mode-view" role="tabpanel" aria-labelledby="modeDoBtn" data-mode-panel="do" hidden>

@@ -1,5 +1,5 @@
 import { analyzeVideoFrame } from "/src/vision/cameraProcessor.js";
-import { classifyColor } from "/src/vision/colorDetector.js";
+import { classifyColor, TemporalMaskStabilizer } from "/src/vision/colorDetector.js";
 import {
   saveColor,
   createTask,
@@ -14,7 +14,7 @@ const $ = (id) => document.getElementById(id);
 
 const video = $("webcam");
 const canvas = $("outputCanvas");
-const ctx = canvas.getContext("2d", { willReadFrequently: true });
+const ctx = canvas.getContext("2d");
 
 const toggleCamBtn = $("toggleCamBtn");
 const toggleCamLabel = $("toggleCamLabel");
@@ -34,7 +34,6 @@ const sampleSwatch = $("sampleSwatch");
 const sampleName = $("sampleName");
 const colorPreview = $("colorPreview");
 const colorNameDisplay = $("colorName");
-const colorDescription = $("colorDescription");
 const colorHex = $("colorHex");
 const colorRgb = $("colorRgb");
 const colorHsl = $("colorHsl");
@@ -46,7 +45,6 @@ const contrastToggle = $("contrastToggle");
 const textSizeToggle = $("textSizeToggle");
 const colorChipToggle = $("colorChipToggle");
 const cameraChipLayer = $("cameraChipLayer");
-const modePreview = $("modePreview");
 const modeButtons = [...document.querySelectorAll("[data-mode-button]")];
 const modePanels = [...document.querySelectorAll("[data-mode-panel]")];
 
@@ -73,10 +71,19 @@ const refreshTasksBtn = $("refreshTasksBtn");
 // Read pixels from the clean camera image so overlays never affect sampling.
 const samplingCanvas = document.createElement("canvas");
 const samplingContext = samplingCanvas.getContext("2d", { willReadFrequently: true });
+const analysisCanvas = document.createElement("canvas");
+const colorMaskStabilizer = new TemporalMaskStabilizer({ holdFrames: 2 });
+const shadeMaskStabilizer = new TemporalMaskStabilizer({ holdFrames: 2 });
+const shadeRegionSmoother = new TemporalMaskStabilizer({ holdFrames: 2 });
+const ANALYSIS_INTERVAL_MS = 80;
 
 let streaming = false;
 let animationFrameId = null;
+let lastAnalysisAt = 0;
+let lastSampleAt = 0;
 let latestColors = [];
+let latestTargetRegions = [];
+let smoothedSampleRgb = null;
 let targetColor = "";
 let targetRgb = null;
 let targetShade = "";
@@ -101,39 +108,6 @@ let instructionImageUrl = null;
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
-const modeDescriptions = {
-  see: "Identify colors in your camera view.",
-  find: "Choose a color and follow its dotted outline.",
-  do: "Turn any instruction into an on-camera visual guide.",
-  memory: "Save shades and bring them back when you need them."
-};
-
-let modePreviewTimer = null;
-
-function placeModePreview(mode) {
-  const button = modeButtons.find((item) => item.dataset.modeButton === mode);
-  if (!button || !modePreview) return;
-  const frameRect = cameraFrame.getBoundingClientRect();
-  const buttonRect = button.getBoundingClientRect();
-  const halfWidth = (modePreview.offsetWidth || 180) / 2;
-  const centerX = buttonRect.left + buttonRect.width / 2 - frameRect.left;
-  const left = clamp(centerX, halfWidth + 12, frameRect.width - halfWidth - 12);
-  const top = Math.max(8, buttonRect.top - frameRect.top - modePreview.offsetHeight - 10);
-  modePreview.style.left = `${left}px`;
-  modePreview.style.top = `${top}px`;
-  modePreview.style.bottom = "auto";
-}
-
-function setModePreview(mode) {
-  if (!modePreview) return;
-  if (modePreviewTimer) window.clearTimeout(modePreviewTimer);
-  modePreview.classList.add("is-changing");
-  modePreviewTimer = window.setTimeout(() => {
-    modePreview.textContent = modeDescriptions[mode] || modeDescriptions.see;
-    placeModePreview(mode);
-    modePreview.classList.remove("is-changing");
-  }, 90);
-}
 
 function setActiveMode(mode) {
   const allowed = ["see", "find", "do", "memory"];
@@ -153,18 +127,11 @@ function setActiveMode(mode) {
     panel.classList.toggle("is-active", active);
   });
 
-  setModePreview(nextMode);
   if (nextMode !== "see" && nextMode !== "find" && nextMode !== "do") setCameraChips([]);
 }
 
-window.addEventListener("resize", () => placeModePreview(currentMode));
-
 modeButtons.forEach((button, index) => {
   button.addEventListener("click", () => setActiveMode(button.dataset.modeButton));
-  button.addEventListener("pointerenter", () => setModePreview(button.dataset.modeButton));
-  button.addEventListener("focus", () => setModePreview(button.dataset.modeButton));
-  button.addEventListener("pointerleave", () => setModePreview(currentMode));
-  button.addEventListener("blur", () => setModePreview(currentMode));
   button.addEventListener("keydown", (event) => {
     const direction = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
     if (!direction) return;
@@ -248,13 +215,19 @@ function setCameraChips(entries = []) {
       clamp(point.x / Math.max(1, canvas.width), 0, 1),
       clamp(point.y / Math.max(1, canvas.height), 0, 1)
     );
-    chip.querySelector(".camera-chip-label").textContent = entry.label;
+    const labelNode = chip.querySelector(".camera-chip-label");
+    if (labelNode.textContent !== entry.label) labelNode.textContent = entry.label;
     const frameWidth = cameraFrame.clientWidth;
     const halfChip = (chip.offsetWidth || 110) / 2;
     const left = clamp(stage.stageX * frameWidth, halfChip + 7, frameWidth - halfChip - 7);
-    chip.style.left = `${left}px`;
-    chip.style.top = `${stage.stageY * 100}%`;
-    chip.style.setProperty("--chip-color", entry.hex || chipColors[String(entry.color || "").toLowerCase()] || "#dbe8df");
+    const nextLeft = `${left}px`;
+    const nextTop = `${stage.stageY * 100}%`;
+    const nextColor = entry.hex || chipColors[String(entry.color || "").toLowerCase()] || "#dbe8df";
+    if (chip.style.left !== nextLeft) chip.style.left = nextLeft;
+    if (chip.style.top !== nextTop) chip.style.top = nextTop;
+    if (chip.style.getPropertyValue("--chip-color") !== nextColor) {
+      chip.style.setProperty("--chip-color", nextColor);
+    }
     chip.classList.toggle("is-below", stage.stageY < .2);
   });
 
@@ -301,14 +274,11 @@ function drawRegionOutline(region, accent = "#f7e8a6") {
   ctx.save();
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  ctx.setLineDash([1.5, 3.5]);
-  ctx.lineWidth = 4.5;
-  ctx.strokeStyle = "rgba(8,16,13,.78)";
-  ctx.shadowColor = "rgba(0,0,0,.28)";
-  ctx.shadowBlur = 4;
+  ctx.setLineDash([5, 4]);
+  ctx.lineWidth = 3.2;
+  ctx.strokeStyle = "rgba(24,27,24,.72)";
   strokeSegments();
-  ctx.shadowBlur = 0;
-  ctx.lineWidth = 2.2;
+  ctx.lineWidth = 1.8;
   ctx.strokeStyle = accent;
   strokeSegments();
   ctx.restore();
@@ -401,6 +371,40 @@ function cuePoint(cue = {}) {
   return hasDirection ? { x: canvas.width * horizontal, y: canvas.height * vertical } : null;
 }
 
+function removeIsolatedMaskNoise(mask, columns, rows) {
+  const filtered = new Uint8Array(mask);
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < columns; x += 1) {
+      const index = y * columns + x;
+      let neighbors = 0;
+      for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+        for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+          const nx = x + offsetX;
+          const ny = y + offsetY;
+          if (nx < 0 || ny < 0 || nx >= columns || ny >= rows) continue;
+          neighbors += mask[ny * columns + nx] ? 1 : 0;
+        }
+      }
+      if (mask[index] && neighbors <= 1) filtered[index] = 0;
+      else if (!mask[index] && neighbors >= 8) filtered[index] = 1;
+    }
+  }
+  return filtered;
+}
+
+function mergeIntervals(intervals) {
+  if (!intervals.length) return [];
+  const sorted = intervals.slice().sort((a, b) => a[0] - b[0]);
+  const merged = [sorted[0].slice()];
+  for (let index = 1; index < sorted.length; index += 1) {
+    const interval = sorted[index];
+    const last = merged[merged.length - 1];
+    if (interval[0] <= last[1]) last[1] = Math.max(last[1], interval[1]);
+    else merged.push(interval.slice());
+  }
+  return merged;
+}
+
 function getBinaryRegions(mask, width, height, step = 4) {
   const columns = Math.ceil(width / step);
   const rows = Math.ceil(height / step);
@@ -411,7 +415,6 @@ function getBinaryRegions(mask, width, height, step = 4) {
     if (!mask[start] || visited[start]) continue;
     const queue = [start];
     const cells = [];
-    const cellSet = new Set();
     visited[start] = 1;
     let cursor = 0;
     let minX = columns, minY = rows, maxX = -1, maxY = -1;
@@ -419,11 +422,12 @@ function getBinaryRegions(mask, width, height, step = 4) {
     while (cursor < queue.length) {
       const index = queue[cursor++];
       cells.push(index);
-      cellSet.add(index);
       const gx = index % columns;
       const gy = Math.floor(index / columns);
-      minX = Math.min(minX, gx); minY = Math.min(minY, gy);
-      maxX = Math.max(maxX, gx); maxY = Math.max(maxY, gy);
+      minX = Math.min(minX, gx);
+      minY = Math.min(minY, gy);
+      maxX = Math.max(maxX, gx);
+      maxY = Math.max(maxY, gy);
       const neighbors = [
         gy > 0 ? index - columns : -1,
         gx < columns - 1 ? index + 1 : -1,
@@ -438,24 +442,51 @@ function getBinaryRegions(mask, width, height, step = 4) {
     }
 
     if (cells.length < 7) continue;
-    const outline = [];
+
+    const cellSet = new Set(cells);
+    const horizontal = new Map();
+    const vertical = new Map();
+    const addInterval = (map, key, left, right) => {
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push([left, right]);
+    };
+
     for (const index of cells) {
       const gx = index % columns;
       const gy = Math.floor(index / columns);
       const left = gx * step, top = gy * step;
       const right = Math.min(width, left + step), bottom = Math.min(height, top + step);
-      if (!cellSet.has(index - columns)) outline.push([left, top, right, top]);
-      if (gx === columns - 1 || !cellSet.has(index + 1)) outline.push([right, top, right, bottom]);
-      if (gy === rows - 1 || !cellSet.has(index + columns)) outline.push([right, bottom, left, bottom]);
-      if (gx === 0 || !cellSet.has(index - 1)) outline.push([left, bottom, left, top]);
+      if (!cellSet.has(index - columns)) addInterval(horizontal, top, left, right);
+      if (gx === columns - 1 || !cellSet.has(index + 1)) addInterval(vertical, right, top, bottom);
+      if (gy === rows - 1 || !cellSet.has(index + columns)) addInterval(horizontal, bottom, left, right);
+      if (gx === 0 || !cellSet.has(index - 1)) addInterval(vertical, left, top, bottom);
     }
+
+    const outline = [];
+    for (const [y, intervals] of horizontal) {
+      for (const [left, right] of mergeIntervals(intervals)) outline.push([left, y, right, y]);
+    }
+    for (const [x, intervals] of vertical) {
+      for (const [top, bottom] of mergeIntervals(intervals)) outline.push([x, top, x, bottom]);
+    }
+    outline.sort((a, b) => {
+      const aHorizontal = a[1] === a[3];
+      const bHorizontal = b[1] === b[3];
+      if (aHorizontal !== bHorizontal) return aHorizontal ? -1 : 1;
+      return aHorizontal ? (a[1] - b[1] || a[0] - b[0]) : (a[0] - b[0] || a[1] - b[1]);
+    });
+
     const x = minX * step, y = minY * step;
     const right = Math.min(width, (maxX + 1) * step);
     const bottom = Math.min(height, (maxY + 1) * step);
+    const center = { x: (x + right) / 2, y: (y + bottom) / 2 };
+    const bucketX = Math.max(step * 4, Math.round(width / 8));
+    const bucketY = Math.max(step * 4, Math.round(height / 6));
     regions.push({
+      id: `${Math.round(center.x / bucketX)}-${Math.round(center.y / bucketY)}`,
       samples: cells.length,
       bounds: { x, y, width: right - x, height: bottom - y },
-      center: { x: (x + right) / 2, y: (y + bottom) / 2 },
+      center,
       outline
     });
   }
@@ -476,50 +507,71 @@ function getShadeMatchRegions() {
   const columns = Math.ceil(width / step);
   const rows = Math.ceil(height / step);
   const mask = new Uint8Array(columns * rows);
-  const thresholdSquared = 82 * 82;
+  const thresholdSquared = 90 * 90;
 
   for (let y = 0; y < height; y += step) {
     for (let x = 0; x < width; x += step) {
-      const index = (y * width + x) * 4;
-      const r = data[index], g = data[index + 1], b = data[index + 2];
+      let red = 0, green = 0, blue = 0, count = 0;
+      for (let sampleY = y; sampleY < Math.min(height, y + step); sampleY += 1) {
+        for (let sampleX = x; sampleX < Math.min(width, x + step); sampleX += 1) {
+          const index = (sampleY * width + sampleX) * 4;
+          red += data[index];
+          green += data[index + 1];
+          blue += data[index + 2];
+          count += 1;
+        }
+      }
+      if (!count) continue;
+      const r = Math.round(red / count), g = Math.round(green / count), b = Math.round(blue / count);
       if (classifyColor(r, g, b).name.toLowerCase() !== targetColor.toLowerCase()) continue;
       const dr = r - targetRgb.r, dg = g - targetRgb.g, db = b - targetRgb.b;
       if (dr * dr + dg * dg + db * db > thresholdSquared) continue;
       mask[Math.floor(y / step) * columns + Math.floor(x / step)] = 1;
     }
   }
-  return getBinaryRegions(mask, width, height, step).map((region) => ({ ...region, hex: rgbToHex(targetRgb) }));
+
+  const spatialMask = removeIsolatedMaskNoise(mask, columns, rows);
+  const stableMask = shadeMaskStabilizer.stabilize(spatialMask, columns, rows);
+  const regions = getBinaryRegions(stableMask, width, height, step)
+    .map((region) => ({ ...region, hex: rgbToHex(targetRgb) }));
+  const [smoothedGroup] = shadeRegionSmoother.smoothRegions([
+    { name: targetColor, regions, bounds: null, samples: regions.reduce((sum, region) => sum + region.samples, 0) }
+  ], width, height);
+  return smoothedGroup?.regions || [];
 }
 
-function drawTargetOverlay() {
+function refreshTargetRegions() {
   const color = latestColors.find((item) => item.name.toLowerCase() === targetColor.toLowerCase());
-  const regions = targetRgb ? getShadeMatchRegions() : (color?.regions || (color ? [{ bounds: color.bounds, center: getRegionCenter(color) }] : []));
+  latestTargetRegions = targetRgb
+    ? getShadeMatchRegions()
+    : (color?.regions || (color ? [{ bounds: color.bounds, center: getRegionCenter(color), id: "all" }] : []));
+}
 
-  if (!regions.length) {
+function updateTargetChips() {
+  if (!latestTargetRegions.length) {
     setCameraChips([]);
     setFeedback(findResult, `Looking for ${targetShade || targetColor}…`);
     return;
   }
 
-  const chips = [];
-  regions.slice(0, 8).forEach((region, index) => {
-    drawRegionOutline(region, "#f5e6a1");
-    chips.push({
-      key: `find-${index}`,
-      label: targetShade || targetColor,
-      color: targetColor,
-      point: getRegionCenter(region),
-      hex: targetRgb ? rgbToHex(targetRgb) : region.hex
-    });
-  });
+  const chips = latestTargetRegions.slice(0, 8).map((region, index) => ({
+    key: `find-${region.id || index}`,
+    label: targetShade || targetColor,
+    color: targetColor,
+    point: getRegionCenter(region),
+    hex: targetRgb ? rgbToHex(targetRgb) : region.hex
+  }));
   setCameraChips(showColorChips ? chips : []);
-  const region = regions[0];
-  setFeedback(findResult, `${targetShade || targetColor} detected · ${getApproximateRegion(region)}`);
+  setFeedback(findResult, `${targetShade || targetColor} detected · ${getApproximateRegion(latestTargetRegions[0])}`);
 }
 
-function drawTaskGuidance() {
+function drawTargetOverlay() {
+  latestTargetRegions.slice(0, 8).forEach((region) => drawRegionOutline(region, "#f5e6a1"));
+}
+
+function drawTaskGuidance(updateChips = false) {
   if (!activeTask || !canvas.width || !canvas.height) {
-    setCameraChips([]);
+    if (updateChips) setCameraChips([]);
     return;
   }
 
@@ -541,7 +593,7 @@ function drawTaskGuidance() {
         drawRegionOutline(region, accent);
         const point = getRegionCenter(region);
         chips.push({
-          key: `task-${cueIndex}-${regionIndex}`,
+          key: `task-${cueIndex}-${region.id || regionIndex}`,
           label: cue.label || cue.object || colorName,
           color: colorName,
           hex: region.hex,
@@ -578,7 +630,7 @@ function drawTaskGuidance() {
       drawRegionOutline(region, "#b9e9cf");
       const point = getRegionCenter(region);
       if (!targetPoint) targetPoint = point;
-      chips.push({ key: `task-target-${index}`, label: activeTask.color || activeTask.normalizedColor, color: activeTask.normalizedColor, hex: region.hex, point });
+      chips.push({ key: `task-target-${region.id || index}`, label: activeTask.color || activeTask.normalizedColor, color: activeTask.normalizedColor, hex: region.hex, point });
     });
   }
 
@@ -598,7 +650,7 @@ function drawTaskGuidance() {
   if (!chips.length) {
     chips.push({ key: "task-summary", label: "Follow the steps", color: "green", point: { x: canvas.width * .5, y: canvas.height * .16 } });
   }
-  setCameraChips(showColorChips ? chips : []);
+  if (updateChips) setCameraChips(showColorChips ? chips : []);
 }
 
 toggleCamBtn.addEventListener("click", async () => {
@@ -625,6 +677,13 @@ toggleCamBtn.addEventListener("click", async () => {
     await video.play();
 
     streaming = true;
+    lastAnalysisAt = 0;
+    lastSampleAt = 0;
+    latestTargetRegions = [];
+    smoothedSampleRgb = null;
+    colorMaskStabilizer.reset();
+    shadeMaskStabilizer.reset();
+    shadeRegionSmoother.reset();
     toggleCamBtn.disabled = false;
     toggleCamBtn.setAttribute("aria-pressed", "true");
     toggleCamBtn.classList.add("is-active");
@@ -656,7 +715,14 @@ function stopCamera() {
 
   video.srcObject = null;
   streaming = false;
+  lastAnalysisAt = 0;
+  lastSampleAt = 0;
   latestColors = [];
+  latestTargetRegions = [];
+  smoothedSampleRgb = null;
+  colorMaskStabilizer.reset();
+  shadeMaskStabilizer.reset();
+  shadeRegionSmoother.reset();
   currentSample = null;
   lastSamplePosition = null;
   resetColorDetails();
@@ -690,44 +756,72 @@ function stopCamera() {
   }
 }
 
-function processLoop() {
+function updateModeGuidance() {
+  if (currentMode === "see") {
+    const chips = showColorChips
+      ? latestColors.flatMap((color) => (color.regions || []).map((region, index) => ({
+          key: `see-${color.name}-${region.id || index}`,
+          label: color.name,
+          color: color.name,
+          hex: region.hex,
+          point: getRegionCenter(region),
+          samples: region.samples
+        }))).sort((a, b) => b.samples - a.samples).slice(0, 10)
+      : [];
+    setCameraChips(chips);
+  } else if (currentMode === "find" && targetColor) {
+    refreshTargetRegions();
+    updateTargetChips();
+  } else if (currentMode === "do" && activeTask) {
+    drawTaskGuidance(true);
+  } else {
+    setCameraChips([]);
+  }
+}
+
+function processLoop(timestamp = performance.now()) {
   if (!streaming) return;
 
   try {
-    const result = analyzeVideoFrame(video, canvas);
-    if (result?.ready) {
-      // analyzeVideoFrame draws the source frame to the canvas.
-      latestColors = result.colors || [];
-      renderDetectedColors(latestColors);
-
-      if (currentMode === "see") {
-        const chips = showColorChips
-          ? latestColors.flatMap((color) => (color.regions || []).map((region, index) => ({
-              key: `see-${color.name}-${index}`,
-              label: color.name,
-              color: color.name,
-              hex: region.hex,
-              point: getRegionCenter(region),
-              samples: region.samples
-            }))).sort((a, b) => b.samples - a.samples).slice(0, 10)
-          : [];
-        setCameraChips(chips);
-      } else if (currentMode === "find" && targetColor) {
-        drawTargetOverlay();
-      } else if (currentMode === "do" && activeTask) {
-        drawTaskGuidance();
-      } else {
-        setCameraChips([]);
+    if (video.readyState >= 2 && video.videoWidth && video.videoHeight) {
+      const frameWidth = 320;
+      const frameHeight = Math.max(1, Math.round(frameWidth * video.videoHeight / video.videoWidth));
+      if (canvas.width !== frameWidth || canvas.height !== frameHeight) {
+        canvas.width = frameWidth;
+        canvas.height = frameHeight;
       }
 
-      if ((pointerIsOverCanvas || pointerIsDown || keyboardSamplingActive) && lastSamplePosition) {
+      // Keep the preview fluid while running the more expensive detector less often.
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      let overlayDrawn = false;
+      const shouldAnalyze = !lastAnalysisAt || timestamp - lastAnalysisAt >= ANALYSIS_INTERVAL_MS;
+
+      if (shouldAnalyze) {
+        const result = analyzeVideoFrame(video, analysisCanvas, colorMaskStabilizer);
+        lastAnalysisAt = timestamp;
+        if (result?.ready) {
+          latestColors = result.colors || [];
+          renderDetectedColors(latestColors);
+          updateModeGuidance();
+          overlayDrawn = currentMode === "do" && Boolean(activeTask);
+
+          if (activeTask?.canAutoVerify && !activeTask.completed && !taskCompletionPending) {
+            taskCheckFrames += 1;
+            if (taskCheckFrames % 5 === 0) verifyTaskFrame();
+          }
+        }
+      }
+
+      if (currentMode === "find" && targetColor) {
+        drawTargetOverlay();
+      } else if (currentMode === "do" && activeTask && !overlayDrawn) {
+        drawTaskGuidance(false);
+      }
+
+      if ((pointerIsOverCanvas || pointerIsDown || keyboardSamplingActive) && lastSamplePosition && timestamp - lastSampleAt >= 64) {
         const source = pointerIsDown ? "touch" : keyboardSamplingActive ? "keyboard" : "pointer";
         sampleImagePoint(lastSamplePosition, source);
-      }
-
-      if (activeTask?.canAutoVerify && !activeTask.completed && !taskCompletionPending) {
-        taskCheckFrames += 1;
-        if (taskCheckFrames % 5 === 0) verifyTaskFrame();
+        lastSampleAt = timestamp;
       }
     }
   } catch (error) {
@@ -791,8 +885,27 @@ function sampleImagePoint(point, source = "pointer") {
     samplingContext.drawImage(video, 0, 0, width, height);
     const pixelX = clamp(Math.floor(point.x * width), 0, width - 1);
     const pixelY = clamp(Math.floor(point.y * height), 0, height - 1);
-    const [r, g, b] = samplingContext.getImageData(pixelX, pixelY, 1, 1).data;
-    const color = classifyColor(r, g, b);
+    const left = Math.max(0, pixelX - 2);
+    const top = Math.max(0, pixelY - 2);
+    const patchWidth = Math.min(width - left, 5);
+    const patchHeight = Math.min(height - top, 5);
+    const pixels = samplingContext.getImageData(left, top, patchWidth, patchHeight).data;
+    let red = 0, green = 0, blue = 0, count = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      red += pixels[index];
+      green += pixels[index + 1];
+      blue += pixels[index + 2];
+      count += 1;
+    }
+    const rawRgb = [Math.round(red / count), Math.round(green / count), Math.round(blue / count)];
+    const moved = !lastSamplePosition || Math.hypot(point.x - lastSamplePosition.x, point.y - lastSamplePosition.y) > 0.012;
+    if (moved || !smoothedSampleRgb) {
+      smoothedSampleRgb = rawRgb;
+    } else {
+      const blend = 0.38;
+      smoothedSampleRgb = smoothedSampleRgb.map((value, index) => Math.round(value + (rawRgb[index] - value) * blend));
+    }
+    const color = classifyColor(...smoothedSampleRgb);
 
     currentSample = { ...color, source, position: { x: point.x, y: point.y } };
     lastSamplePosition = point;
@@ -851,29 +964,12 @@ function rgbToHsl(r, g, b) {
   };
 }
 
-function getPlainLanguageDescription(sample, hsl) {
-  if (sample.name === "Unknown") return "Outside supported categories";
-  if (sample.name === "Black") return "Very dark neutral";
-  if (sample.name === "White") return "Very light neutral";
-  if (sample.name === "Gray") return "Low-saturation neutral";
-
-  const lightness = hsl.l < 20 ? "Very dark" :
-    hsl.l < 40 ? "Dark" :
-    hsl.l < 60 ? "Medium" :
-    hsl.l < 80 ? "Light" : "Very light";
-  const saturation = hsl.s < 20 ? "muted" :
-    hsl.s < 45 ? "soft" :
-    hsl.s < 70 ? "moderate" : "vivid";
-  return `${lightness}, ${saturation} ${sample.name.toLowerCase()}`;
-}
-
 function renderColorDetails(sample) {
   const { r, g, b } = sample.rgb;
   const hsl = rgbToHsl(r, g, b);
 
   colorPreview.style.backgroundColor = sample.hex;
   colorNameDisplay.textContent = sample.name;
-  colorDescription.textContent = getPlainLanguageDescription(sample, hsl);
   colorHex.textContent = sample.hex;
   colorRgb.textContent = `(${r}, ${g}, ${b})`;
   colorHsl.textContent = `(${hsl.h}°, ${hsl.s}%, ${hsl.l}%)`;
@@ -885,7 +981,6 @@ function renderColorDetails(sample) {
 function resetColorDetails() {
   colorPreview.style.backgroundColor = "#e4e8e5";
   colorNameDisplay.textContent = "No sample yet";
-  colorDescription.textContent = "Tap the camera view to sample.";
   colorHex.textContent = "—";
   colorRgb.textContent = "—";
   colorHsl.textContent = "—";
@@ -912,7 +1007,8 @@ function getApproximateRegion(color) {
 }
 
 function renderDetectedColors(colors) {
-  const signature = colors.map((color) => `${color.name}:${getApproximateRegion(color)}`).join("|");
+  const orderedColors = [...colors].sort((a, b) => a.name.localeCompare(b.name));
+  const signature = orderedColors.map((color) => color.name).join("|");
 
   if (signature !== detectedLayoutSignature) {
     detectedLayoutSignature = signature;
@@ -927,7 +1023,7 @@ function renderDetectedColors(colors) {
       return;
     }
 
-    if (colors.length === 0) {
+    if (orderedColors.length === 0) {
       const empty = document.createElement("li");
       empty.className = "detected-empty";
       empty.textContent = "No supported color groups in view.";
@@ -935,7 +1031,7 @@ function renderDetectedColors(colors) {
       return;
     }
 
-    for (const color of colors) {
+    for (const color of orderedColors) {
       const item = document.createElement("li");
       item.className = "detected-color-item";
 
@@ -953,16 +1049,18 @@ function renderDetectedColors(colors) {
 
       item.append(name, count, region);
       detectedColorsList.append(item);
-      detectedItemsByName.set(color.name, count);
+      detectedItemsByName.set(color.name, { count, region });
     }
   }
 
-  for (const color of colors) {
-    const count = detectedItemsByName.get(color.name);
-    if (count) {
-      const points = Number(color.samples) || 0;
-      count.textContent = `${points.toLocaleString()} sampled points`;
-    }
+  for (const color of orderedColors) {
+    const nodes = detectedItemsByName.get(color.name);
+    if (!nodes) continue;
+    const points = Number(color.samples) || 0;
+    const countText = `${points.toLocaleString()} sampled points`;
+    const regionText = getApproximateRegion(color);
+    if (nodes.count.textContent !== countText) nodes.count.textContent = countText;
+    if (nodes.region.textContent !== regionText) nodes.region.textContent = regionText;
   }
 }
 
@@ -970,6 +1068,7 @@ function sampleFromPointer(event) {
   const point = getImagePoint(event.clientX, event.clientY);
   if (!point) {
     lastSamplePosition = null;
+    smoothedSampleRgb = null;
     sampleIndicator.classList.remove("is-visible");
     return null;
   }
@@ -995,6 +1094,8 @@ canvas.addEventListener("pointerdown", (event) => {
   if (!streaming) return;
   pointerIsDown = true;
   keyboardSamplingActive = false;
+  lastSamplePosition = null;
+  smoothedSampleRgb = null;
   canvas.focus({ preventScroll: true });
   if (event.pointerType !== "mouse") event.preventDefault();
   if (canvas.setPointerCapture) canvas.setPointerCapture(event.pointerId);
@@ -1014,6 +1115,7 @@ canvas.addEventListener("pointerleave", (event) => {
   if (event.pointerType === "mouse" && !pointerIsDown) {
     pointerIsOverCanvas = false;
     lastSamplePosition = null;
+    smoothedSampleRgb = null;
     sampleIndicator.classList.remove("is-visible");
   }
 });
@@ -1021,6 +1123,8 @@ canvas.addEventListener("pointerleave", (event) => {
 canvas.addEventListener("focus", () => {
   if (!streaming || pointerIsDown) return;
   keyboardPosition = { x: 0.5, y: 0.5 };
+  lastSamplePosition = null;
+  smoothedSampleRgb = null;
   keyboardSamplingActive = true;
   sampleImagePoint({
     ...keyboardPosition,
@@ -1110,6 +1214,9 @@ function setFindTarget(value, shouldSpeak = true, colorReference = null) {
   targetColor = normalized;
   targetRgb = colorReference?.rgb || null;
   targetShade = colorReference?.shade || "";
+  latestTargetRegions = [];
+  shadeMaskStabilizer.reset();
+  shadeRegionSmoother.reset();
   colorSelect.value = normalized;
   if (!normalized) {
     targetRgb = null;
@@ -1130,6 +1237,9 @@ clearFindBtn.addEventListener("click", () => {
   targetColor = "";
   targetRgb = null;
   targetShade = "";
+  latestTargetRegions = [];
+  shadeMaskStabilizer.reset();
+  shadeRegionSmoother.reset();
   colorSelect.value = "";
   setFeedback(findResult, "Choose a target to begin.");
 });

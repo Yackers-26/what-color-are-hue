@@ -6,7 +6,7 @@ A camera-first accessibility workspace for color identification, color finding, 
 
 ## Features
 
-- **HueSee** — live color recognition, pointer/touch sampling, HEX/RGB/HSL values, speech, and floating color chips anchored to major detected color regions.
+- **HueSee** — live color recognition, pointer/touch sampling, HEX/RGB/HSL values, speech, and floating color chips anchored to major detected color regions. Camera sampling averages small pixel patches; region labels and contours use spatial cleanup, two-frame persistence, and temporal geometry smoothing to reduce webcam noise and flicker.
 - **HueFind** — find a selected or saved shade with dotted contours that follow separate connected color regions instead of large category-wide rectangles.
 - **HueDo** — Gemini interprets open-ended typed or photographed instructions into concise steps and optional visual cues. The camera view can show target chips, dotted outlines, and directional arrows when the instruction provides usable spatial or color information.
 - **HueMemory** — save and reuse color references with MongoDB Atlas.
@@ -15,7 +15,7 @@ A camera-first accessibility workspace for color identification, color finding, 
 
 ## Interface
 
-The app uses one camera-centered workspace. The mode dock switches between HueSee, HueFind, HueDo, and HueMemory without stopping the camera. Desktop uses a contextual side panel; mobile keeps the mode dock inside the bottom of the camera frame. Hovering or focusing a mode shows a short preview above the dock.
+The app uses one camera-centered workspace with a warm editorial visual system. The mode dock switches between HueSee, HueFind, HueDo, and HueMemory without stopping the camera. Camera preview remains full-rate while color analysis runs at a lower, steadier cadence to keep the interface responsive. Desktop uses a contextual side panel; mobile keeps the mode dock inside the bottom of the camera frame. Hovering or focusing a mode shows a short preview above the dock.
 
 The color-chip toggle controls floating labels in the camera view. HueFind and HueDo use thin dotted contours around detected connected color regions rather than broad bounding boxes.
 
