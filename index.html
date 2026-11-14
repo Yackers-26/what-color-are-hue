@@ -3,67 +3,224 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>WhatColorAreHue — See it. Find it. Do it.</title>
+  <meta name="theme-color" content="#f5f1e8">
+  <meta name="description" content="An accessible camera-based color identification assistant.">
+  <title>WhatColorAreHue — See color on your terms.</title>
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="editorial.css">
 </head>
 <body>
-  <header>
-    <h1>WhatColorAreHue</h1>
-    <p class="tagline">See it. Find it. Do it. Make a world built around color accessible to everyone.</p>
+  <a class="skip-link" href="#scanner">Skip to HueSee scanner</a>
+
+  <header class="site-header">
+    <a class="brand" href="#top" aria-label="WhatColorAreHue home">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+      <span>whatcolorarehue<span class="brand-period">.</span></span>
+    </a>
+    <nav class="site-nav" aria-label="Page navigation">
+      <a href="#scanner">HueSee</a>
+      <a href="#whats-next">What’s next</a>
+    </nav>
+    <div class="header-tools" aria-label="Display preferences">
+      <button id="contrastToggle" class="preference-button" type="button" aria-pressed="false">
+        <span class="preference-icon contrast-icon" aria-hidden="true">◐</span>
+        <span>High contrast</span>
+      </button>
+      <button id="textSizeToggle" class="preference-button" type="button" aria-pressed="false">
+        <span class="preference-icon" aria-hidden="true">A+</span>
+        <span>Larger text</span>
+      </button>
+    </div>
   </header>
 
-  <main class="container">
-    <!-- Left Column: Controls & Features -->
-    <section class="control-panel" aria-labelledby="controls-heading">
-      <h2 id="controls-heading">Accessibility Controls</h2>
-      
-      <!-- Webcam Toggle -->
-      <div class="control-group">
-        <button id="toggleCamBtn" class="primary-btn">Start Camera</button>
+  <main id="main-content" class="app-shell">
+    <section class="page-intro" id="top" aria-labelledby="pageTitle">
+      <div class="intro-copy">
+        <p class="eyebrow"><span class="eyebrow-mark" aria-hidden="true"></span> AN ACCESSIBILITY TOOL FOR EVERYDAY COLOR</p>
+        <h1 id="pageTitle">Color, on <em>your</em><br>own terms<span class="hero-dot">.</span></h1>
+        <p class="intro-description">The world speaks in color. We make sure you can understand it. Use your camera to identify what’s in front of you — with words, numbers, and sound.</p>
+        <div class="hero-actions">
+          <a class="hero-cta" href="#scanner">Explore HueSee <span aria-hidden="true">↗</span></a>
+          <span class="hero-side-note">A more accessible way to see.</span>
+        </div>
       </div>
-
-      <!-- Feature 1: HueSee -->
-      <div class="control-group card">
-        <h3>1. HueSee (Identify)</h3>
-        <p>Live color detection from the webcam feed.</p>
-        <button id="announceBtn" class="action-btn" disabled>Read Detected Colors Aloud</button>
-        <div id="seeResult" class="output-box" aria-live="polite">Status: Camera off</div>
-      </div>
-
-      <!-- Feature 2: HueFind -->
-      <div class="control-group card">
-        <h3>2. HueFind (Locate)</h3>
-        <label for="colorSelect">Select Target Color to Highlight:</label>
-        <select id="colorSelect" disabled>
-          <option value="">-- Show All Detected Colors --</option>
-          <option value="Red">Red</option>
-          <option value="Green">Green</option>
-          <option value="Blue">Blue</option>
-          <option value="Yellow">Yellow</option>
-        </select>
-        <div id="findResult" class="output-box" aria-live="polite">Showing all colors</div>
-      </div>
-
-      <!-- Feature 3: HueDo & Gemini -->
-      <div class="control-group card">
-        <h3>3. HueDo (Task & AI)</h3>
-        <p>Instruction: <em>"Place the green block into Box B."</em></p>
-        <button id="taskBtn" class="action-btn" disabled>Verify Task Completion</button>
-        <div id="taskResult" class="output-box" aria-live="polite">Waiting for action...</div>
+      <div class="hero-art" aria-hidden="true">
+        <div class="art-paper"><span class="art-index">COLOR STUDY / 001</span><span class="art-caption">NOT JUST WHAT YOU SEE.<br>WHAT YOU UNDERSTAND.</span></div>
+        <div class="art-disc disc-sage"></div>
+        <div class="art-disc disc-yellow"></div>
+        <div class="art-disc disc-blue"></div>
+        <div class="art-disc disc-coral"></div>
+        <div class="art-ring"></div>
+        <span class="art-corner">WC / AH<br>2026</span>
       </div>
     </section>
 
-    <!-- Right Column: Live Video Feed & Canvas Overlay -->
-    <section class="viewfinder-section" aria-label="Camera Viewfinder">
-      <div class="video-container">
-        <video id="webcam" autoplay playsinline muted></video>
-        <canvas id="outputCanvas"></canvas>
+    <div class="color-ribbon" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+
+    <div class="section-intro reveal" id="scanner">
+      <div>
+        <p class="section-overline">01 / HUESEE · WORKING FEATURE</p>
+        <h2>Meet your <em>color inspector.</em></h2>
       </div>
-      <div id="audioAnnouncement" class="sr-only" aria-live="assertive"></div>
+      <p>Hover to inspect a color. On a phone, press and hold. No special hardware, no guessing.</p>
+    </div>
+
+    <section class="camera-workspace" aria-label="HueSee color scanner">
+      <div class="camera-toolbar reveal">
+        <div class="camera-actions">
+          <button id="toggleCamBtn" class="camera-button" type="button" aria-pressed="false">
+            <span class="camera-button-icon" aria-hidden="true"></span>
+            <span id="toggleCamLabel">Start camera</span>
+          </button>
+          <span id="cameraStatus" class="camera-status" role="status" aria-live="polite">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="cameraStatusText">Camera off</span>
+          </span>
+          <button id="regionOverlayToggle" class="overlay-toggle" type="button" aria-pressed="true">Hide region outlines</button>
+        </div>
+        <p class="toolbar-hint"><span class="live-indicator" aria-hidden="true"></span> LIVE CAMERA ANALYSIS</p>
+      </div>
+
+      <div class="workspace-grid reveal">
+        <div class="camera-column">
+          <div class="camera-stage" id="cameraFrame">
+            <video id="webcam" class="camera-source" autoplay playsinline muted aria-hidden="true"></video>
+            <canvas
+              id="outputCanvas"
+              tabindex="0"
+              role="group"
+              aria-label="Live camera color sampler. Move the pointer over the image to inspect a color. On a touchscreen, press and hold or tap. Use the arrow keys to move the sample point, then press Enter or Space to hear the color details. Hold Shift while using an arrow key to move farther."
+              aria-describedby="sampleInstructions"
+            ></canvas>
+
+            <div id="sampleIndicator" class="sample-indicator" aria-hidden="true">
+              <span id="sampleSwatch" class="sample-swatch"></span>
+              <span class="sample-inline-text"><span id="sampleName">Color</span><small id="sampleHex">#000000</small></span>
+            </div>
+            <div id="sampleTarget" class="sample-target" aria-hidden="true"><span></span></div>
+
+            <div id="cameraPlaceholder" class="camera-placeholder">
+              <span class="placeholder-camera" aria-hidden="true"></span>
+              <p class="placeholder-title">Camera is off</p>
+              <p class="placeholder-copy">Start the camera to inspect colors in view.</p>
+            </div>
+          </div>
+
+          <div class="sampling-guide">
+            <span class="guide-icon" aria-hidden="true">⌖</span>
+            <div>
+              <p class="guide-title">Choose a point to identify</p>
+              <p id="sampleInstructions" class="sample-instructions">Hover on desktop. On a phone, touch or press and hold, then drag to explore. Keyboard: Tab to focus the camera, move with arrow keys, then press Enter to hear your selection.</p>
+            </div>
+          </div>
+        </div>
+
+        <aside class="color-info-panel" aria-labelledby="colorInfoHeading">
+          <div class="panel-heading-row">
+            <div>
+              <p class="panel-eyebrow">LIVE READOUT</p>
+              <h2 id="colorInfoHeading">Color information</h2>
+            </div>
+            <span class="panel-status"><span class="panel-status-dot" aria-hidden="true"></span> POINT SAMPLE</span>
+          </div>
+
+          <div class="selected-color" aria-label="Selected color">
+            <div id="colorPreview" class="color-preview" aria-hidden="true"></div>
+            <div class="selected-color-copy">
+              <p class="selected-label">SAMPLED COLOR</p>
+              <p id="colorName" class="selected-color-name">No sample yet</p>
+              <p id="colorDescription" class="selected-color-description">Start the camera, then choose a point in the image.</p>
+            </div>
+          </div>
+
+          <dl class="color-values">
+            <div class="value-row">
+              <dt>HEX</dt>
+              <dd id="colorHex">—</dd>
+            </div>
+            <div class="value-row">
+              <dt>RGB</dt>
+              <dd id="colorRgb">—</dd>
+            </div>
+            <div class="value-row">
+              <dt>HSL</dt>
+              <dd id="colorHsl">—</dd>
+            </div>
+          </dl>
+
+          <section class="readability-section" aria-labelledby="readabilityHeading">
+            <div class="readability-heading">
+              <h3 id="readabilityHeading">Brightness &amp; text contrast</h3>
+              <span id="luminanceValue" class="luminance-value">—</span>
+            </div>
+            <p class="metric-caption">Relative luminance</p>
+            <div class="luminance-track" role="meter" aria-label="Relative luminance" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="luminanceMeter">
+              <span id="luminanceBar" class="luminance-bar"></span>
+            </div>
+            <div class="contrast-results">
+              <div class="contrast-result">
+                <span class="contrast-label"><span class="contrast-sample black-sample" aria-hidden="true">A</span> Black text</span>
+                <strong id="blackContrast">—</strong>
+              </div>
+              <div class="contrast-result">
+                <span class="contrast-label"><span class="contrast-sample white-sample" aria-hidden="true">A</span> White text</span>
+                <strong id="whiteContrast">—</strong>
+              </div>
+            </div>
+            <p id="contrastRecommendation" class="contrast-recommendation">Select a color to see which text color has stronger contrast.</p>
+          </section>
+
+          <button id="speakDetailsBtn" class="speak-button" type="button" disabled>
+            <span class="speak-icon" aria-hidden="true">◖))</span>
+            Hear color details
+          </button>
+          <p class="panel-footnote">Values average a small patch of camera pixels. Lighting, shadows, and camera settings can change the reading; shade names are approximate.</p>
+        </aside>
+      </div>
+
+      <section class="detected-section reveal" aria-labelledby="detectedHeading">
+        <div class="detected-heading-row">
+          <div>
+            <p class="panel-eyebrow">SCENE OVERVIEW</p>
+            <h2 id="detectedHeading">Colors detected in view</h2>
+          </div>
+          <p class="detected-heading-note">Text labels and approximate regions</p>
+        </div>
+        <ul id="detectedColors" class="detected-color-list">
+          <li class="detected-empty">Start the camera to see broad color groups detected in the frame.</li>
+        </ul>
+        <p class="detected-disclaimer">Outlines and location cues show approximate bounds of grouped color samples, not individual object detections. A color may appear in more than one place in the camera view.</p>
+      </section>
     </section>
+
+    <section class="next-features reveal" id="whats-next" aria-labelledby="nextTitle">
+      <div class="next-heading">
+        <p class="section-overline">THE ROAD AHEAD</p>
+        <h2 id="nextTitle">See it. <em>Find it.</em> Do it.</h2>
+        <p>We’re building beyond identification. The tools below are planned next — not live features yet.</p>
+      </div>
+      <div class="next-grid">
+        <article class="next-card">
+          <span class="next-number">02 / HUEFIND</span>
+          <span class="next-symbol" aria-hidden="true">⌖</span>
+          <h3>Find the exact color.</h3>
+          <p>Search the scene for a requested color using labels and high-contrast guidance.</p>
+          <span class="next-state">IN DEVELOPMENT</span>
+        </article>
+        <article class="next-card next-card-alt">
+          <span class="next-number">03 / HUEDO</span>
+          <span class="next-symbol" aria-hidden="true">↗</span>
+          <h3>Make color actionable.</h3>
+          <p>Turn color-dependent instructions into clear steps you can follow and verify.</p>
+          <span class="next-state">IN DEVELOPMENT</span>
+        </article>
+      </div>
+    </section>
+    <footer class="site-footer"><span>whatcolorarehue<span class="brand-period">.</span></span><p>See it. Find it. Do it.</p><a href="#top">Back to top ↑</a></footer>
   </main>
 
-  <!-- type="module" is required to import from src/vision/cameraProcessor.js -->
+  <div id="audioAnnouncement" class="sr-only" aria-live="assertive" aria-atomic="true"></div>
+
   <script type="module" src="script.js"></script>
 </body>
 </html>
