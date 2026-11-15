@@ -1,24 +1,64 @@
 import { analyzeVideoFrame } from "/src/vision/cameraProcessor.js";
-import { classifyColor } from "/src/vision/colorDetector.js";
+import { classifyColor, TemporalMaskStabilizer } from "/src/vision/colorDetector.js";
+import { selectDisplayRegions } from "/src/vision/regionPresentation.js";
+import { findSmoothColorContours, SmoothContourTracker, pickFocusedContour } from "/src/vision/smoothContours.js";
+import { calculateNeutralGains, neutralReferenceFromCenter } from "/src/vision/cameraCalibration.js";
+import { closestReferenceShade } from "/src/vision/referenceColors.js";
+import { averagePixelRegion } from "/src/vision/sampleColor.js";
+import { createFluidReading } from "/src/vision/fluidReading.js";
 import {
   saveColor,
   createTask,
   loadTasks,
   completeTask,
-  interpret
+  interpret,
+  checkTask
 } from "/js/huememory.js";
+import { parseInstruction, buildGuideSteps } from "/js/hueDoParser.js";
 import { mountPalette } from "/js/palettePanel.js";
 import { mountImagePicker } from "/js/imagePicker.js";
 
+document.documentElement.classList.add("js");
 const $ = (id) => document.getElementById(id);
+// Account ownership is enforced on the server. This display is informational only.
+fetch("/api/auth/me", { credentials: "same-origin" })
+  .then(response => response.json())
+  .then(({ user, demo }) => {
+    if (!user && !demo) { window.location.assign("/login"); return; }
+    const label = $("accountName");
+    if (label) label.textContent = demo ? "Demo mode" : (user.name || user.email);
+    if (demo) $("signOutBtn").textContent = "Back to sign in";
+    window.hueDemoMode = Boolean(demo);
+  }).catch(() => {});
+$("signOutBtn")?.addEventListener("click", async () => {
+  if (window.hueDemoMode) { window.location.assign("/exit-demo"); return; }
+  const button = $("signOutBtn");
+  button.disabled = true;
+  try {
+    await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
+    window.location.assign("/login");
+  } catch {
+    button.disabled = false;
+  }
+});
 
 const video = $("webcam");
 const canvas = $("outputCanvas");
 const ctx = canvas.getContext("2d", { willReadFrequently: true });
+const hueFindVectorOverlay = $("hueFindVectorOverlay");
+const hueFindPath = $("hueFindPath");
+const hueFindPathShadow = $("hueFindPathShadow");
+
+// Never draw camera frames on the overlay: only HueFind contours and HueDo guides.
+const analysisCanvas = document.createElement("canvas");
 
 const toggleCamBtn = $("toggleCamBtn");
 const toggleCamLabel = $("toggleCamLabel");
 const colorSelect = $("colorSelect");
+const cameraDeviceSelect = $("cameraDeviceSelect");
+const focusResetBtn = $("focusResetBtn");
+const calibrateBtn = $("calibrateBtn");
+const calibrationStatus = $("calibrationStatus");
 const sampleFindBtn = $("sampleFindBtn");
 const clearFindBtn = $("clearFindBtn");
 const findResult = $("findResult");
@@ -32,6 +72,12 @@ const cameraFrame = $("cameraFrame");
 const sampleIndicator = $("sampleIndicator");
 const sampleSwatch = $("sampleSwatch");
 const sampleName = $("sampleName");
+const sampleHex = $("sampleHex");
+const sampleRgb = $("sampleRgb");
+const sampleReticle = $("sampleReticle");
+const pinColorBtn = $("pinColorBtn");
+const readingStatus = $("readingStatus");
+const scanSceneBtn = $("scanSceneBtn");
 const colorPreview = $("colorPreview");
 const colorNameDisplay = $("colorName");
 const colorDescription = $("colorDescription");
@@ -45,6 +91,7 @@ const detectedColorsList = $("detectedColors");
 const contrastToggle = $("contrastToggle");
 const textSizeToggle = $("textSizeToggle");
 const colorChipToggle = $("colorChipToggle");
+const colorChipToggleText = $("colorChipToggleText");
 const cameraChipLayer = $("cameraChipLayer");
 const modePreview = $("modePreview");
 const modeButtons = [...document.querySelectorAll("[data-mode-button]")];
@@ -84,11 +131,27 @@ let pointerIsDown = false;
 let pointerIsOverCanvas = false;
 let keyboardSamplingActive = false;
 let currentSample = null;
+let pinnedSample = null;
+let pinnedPosition = null;
+let pointerStart = null;
+let lastSampleTime = 0;
+let lastFrameAnalysis = 0;
+let scanSceneRequested = false;
+let hasScannedScene = false;
+const steadyReading = createFluidReading();
+const SAMPLE_INTERVAL_MS = 32;
+const FRAME_INTERVAL_MS = 180;
+const FIND_INTERVAL_MS = 95;
+const hueFindTracker = new SmoothContourTracker({ blend: .32, confirmationFrames: 2, holdFrames: 6 });
+let focusedContourId = null;
+let pendingFocusPoint = null;
+let neutralGains = null;
 let lastSamplePosition = null;
 let keyboardPosition = { x: 0.5, y: 0.5 };
 let detectedLayoutSignature = "";
 let detectedItemsByName = new Map();
 let showColorChips = true;
+const hueSeeRegionStabilizer = new TemporalMaskStabilizer({ holdFrames: 2 });
 let currentMode = "see";
 let cameraChipNodes = new Map();
 let pendingTaskDraft = null;
@@ -138,7 +201,28 @@ function setModePreview(mode) {
 function setActiveMode(mode) {
   const allowed = ["see", "find", "do", "memory"];
   const nextMode = allowed.includes(mode) ? mode : "see";
+  if (currentMode !== nextMode) { hueFindTracker.reset(); focusedContourId = null; pendingFocusPoint = null; }
   currentMode = nextMode;
+  const pageTitle = document.getElementById("pageTitle");
+  const pageHint = document.getElementById("pageHint");
+  if (pageTitle) {
+    const words = { see: ["Hue", "See"], find: ["Hue", "Find"], do: ["Hue", "Do"], memory: ["Hue", "Memory"] };
+    const [first, second] = words[nextMode];
+    pageTitle.innerHTML = `${first}<span>${second}</span>`;
+  }
+  if (pageHint) pageHint.textContent = { see: "Move to inspect. Click or tap to pin.", find: "Choose a color to find its matching areas.", do: "Follow a color-guided task.", memory: "Your saved colors and shades." }[nextMode];
+  cameraFrame.classList.toggle("is-see-mode", nextMode === "see");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  clearVectorOutline();
+  // The hovering HueSee tooltip must not cover the HueFind contour or task guides.
+  if (nextMode !== "see") {
+    sampleIndicator.classList.remove("is-visible");
+    sampleReticle.classList.remove("is-visible");
+  } else if (pinnedSample && pinnedPosition) {
+    movePinnedIndicator(pinnedPosition);
+  }
+  if (nextMode === "see") showHueSeeRegionLabels(latestColors);
+  if (nextMode === "find" && streaming && targetColor) drawTargetOverlay();
 
   modeButtons.forEach((button) => {
     const active = button.dataset.modeButton === nextMode;
@@ -154,7 +238,7 @@ function setActiveMode(mode) {
   });
 
   setModePreview(nextMode);
-  if (nextMode !== "see" && nextMode !== "find" && nextMode !== "do") setCameraChips([]);
+  if (nextMode === "memory") setCameraChips([]);
 }
 
 window.addEventListener("resize", () => placeModePreview(currentMode));
@@ -221,6 +305,22 @@ const chipColors = {
   red: "#ee7772", orange: "#e9a16b", yellow: "#e8d16d", green: "#81b88d",
   cyan: "#7ccbc6", blue: "#7e9fdf", purple: "#b59ad9", black: "#68716d"
 };
+
+// In HueSee, show ONLY text labels at stabilized region centers. No outlines.
+function showHueSeeRegionLabels(colors = []) {
+  if (currentMode !== "see" || !showColorChips) {
+    setCameraChips([]);
+    return;
+  }
+  const regions = selectDisplayRegions(colors, { limit: 6, minSamples: 30 });
+  setCameraChips(regions.map((region) => ({
+    key: region.key,
+    label: region.name,
+    color: region.name,
+    point: region.center,
+    hex: chipColors[String(region.name).toLowerCase()] || region.hex
+  })));
+}
 
 function setCameraChips(entries = []) {
   const visible = entries.slice(0, 12);
@@ -401,120 +501,82 @@ function cuePoint(cue = {}) {
   return hasDirection ? { x: canvas.width * horizontal, y: canvas.height * vertical } : null;
 }
 
-function getBinaryRegions(mask, width, height, step = 4) {
-  const columns = Math.ceil(width / step);
-  const rows = Math.ceil(height / step);
-  const visited = new Uint8Array(mask.length);
-  const regions = [];
-
-  for (let start = 0; start < mask.length; start += 1) {
-    if (!mask[start] || visited[start]) continue;
-    const queue = [start];
-    const cells = [];
-    const cellSet = new Set();
-    visited[start] = 1;
-    let cursor = 0;
-    let minX = columns, minY = rows, maxX = -1, maxY = -1;
-
-    while (cursor < queue.length) {
-      const index = queue[cursor++];
-      cells.push(index);
-      cellSet.add(index);
-      const gx = index % columns;
-      const gy = Math.floor(index / columns);
-      minX = Math.min(minX, gx); minY = Math.min(minY, gy);
-      maxX = Math.max(maxX, gx); maxY = Math.max(maxY, gy);
-      const neighbors = [
-        gy > 0 ? index - columns : -1,
-        gx < columns - 1 ? index + 1 : -1,
-        gy < rows - 1 ? index + columns : -1,
-        gx > 0 ? index - 1 : -1
-      ];
-      for (const neighbor of neighbors) {
-        if (neighbor < 0 || !mask[neighbor] || visited[neighbor]) continue;
-        visited[neighbor] = 1;
-        queue.push(neighbor);
-      }
-    }
-
-    if (cells.length < 7) continue;
-    const outline = [];
-    for (const index of cells) {
-      const gx = index % columns;
-      const gy = Math.floor(index / columns);
-      const left = gx * step, top = gy * step;
-      const right = Math.min(width, left + step), bottom = Math.min(height, top + step);
-      if (!cellSet.has(index - columns)) outline.push([left, top, right, top]);
-      if (gx === columns - 1 || !cellSet.has(index + 1)) outline.push([right, top, right, bottom]);
-      if (gy === rows - 1 || !cellSet.has(index + columns)) outline.push([right, bottom, left, bottom]);
-      if (gx === 0 || !cellSet.has(index - 1)) outline.push([left, bottom, left, top]);
-    }
-    const x = minX * step, y = minY * step;
-    const right = Math.min(width, (maxX + 1) * step);
-    const bottom = Math.min(height, (maxY + 1) * step);
-    regions.push({
-      samples: cells.length,
-      bounds: { x, y, width: right - x, height: bottom - y },
-      center: { x: (x + right) / 2, y: (y + bottom) / 2 },
-      outline
-    });
+// Vector paths render sharply even when the canvas's 320px processing resolution
+// is scaled to a large laptop display. A closed Catmull-Rom spline smooths corners.
+function clearVectorOutline() {
+  hueFindPath?.setAttribute("d", "");
+  hueFindPathShadow?.setAttribute("d", "");
+}
+function contourSplinePath(points) {
+  if (!points || points.length < 3) return "";
+  const f = value => Number(value.toFixed(2));
+  let d = `M ${f(points[0][0])} ${f(points[0][1])}`;
+  const n = points.length;
+  for (let i = 0; i < n; i++) {
+    const p0 = points[(i + n - 1) % n], p1 = points[i];
+    const p2 = points[(i + 1) % n], p3 = points[(i + 2) % n];
+    const c1 = [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6];
+    const c2 = [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6];
+    d += ` C ${f(c1[0])} ${f(c1[1])} ${f(c2[0])} ${f(c2[1])} ${f(p2[0])} ${f(p2[1])}`;
   }
-  return regions.sort((a, b) => b.samples - a.samples);
+  return d + " Z";
+}
+function drawSmoothTargetContour(points) {
+  const d = contourSplinePath(points);
+  hueFindPath?.setAttribute("d", d);
+  hueFindPathShadow?.setAttribute("d", d);
 }
 
-function getShadeMatchRegions() {
-  if (!targetRgb || !video.videoWidth || !video.videoHeight) return [];
-  const width = 320;
-  const height = Math.max(1, Math.round(width * video.videoHeight / video.videoWidth));
+function drawTargetOverlay() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  clearVectorOutline();
+  if (!targetColor || video.readyState < 2 || !video.videoWidth) {
+    setCameraChips([]);
+    return;
+  }
+
+  const width = canvas.width || 320;
+  const height = canvas.height || Math.max(1, Math.round(width * video.videoHeight / video.videoWidth));
   if (samplingCanvas.width !== width || samplingCanvas.height !== height) {
     samplingCanvas.width = width;
     samplingCanvas.height = height;
   }
+  hueFindVectorOverlay?.setAttribute("viewBox", `0 0 ${width} ${height}`);
   samplingContext.drawImage(video, 0, 0, width, height);
-  const { data } = samplingContext.getImageData(0, 0, width, height);
-  const step = 4;
-  const columns = Math.ceil(width / step);
-  const rows = Math.ceil(height / step);
-  const mask = new Uint8Array(columns * rows);
-  const thresholdSquared = 82 * 82;
-
-  for (let y = 0; y < height; y += step) {
-    for (let x = 0; x < width; x += step) {
-      const index = (y * width + x) * 4;
-      const r = data[index], g = data[index + 1], b = data[index + 2];
-      if (classifyColor(r, g, b).name.toLowerCase() !== targetColor.toLowerCase()) continue;
-      const dr = r - targetRgb.r, dg = g - targetRgb.g, db = b - targetRgb.b;
-      if (dr * dr + dg * dg + db * db > thresholdSquared) continue;
-      mask[Math.floor(y / step) * columns + Math.floor(x / step)] = 1;
-    }
+  const frame = samplingContext.getImageData(0, 0, width, height);
+  const found = findSmoothColorContours(frame, {
+    color: targetColor, rgb: targetRgb, minAreaFraction: .015,
+    relativeMinArea: .28, maxRegions: 6, whiteBalance: neutralGains
+  });
+  const allRegions = hueFindTracker.update(found, width, height);
+  if (pendingFocusPoint && !focusedContourId) {
+    const match = pickFocusedContour(allRegions, pendingFocusPoint, .19, width, height);
+    if (match) { focusedContourId = match.id; pendingFocusPoint = null; }
   }
-  return getBinaryRegions(mask, width, height, step).map((region) => ({ ...region, hex: rgbToHex(targetRgb) }));
-}
-
-function drawTargetOverlay() {
-  const color = latestColors.find((item) => item.name.toLowerCase() === targetColor.toLowerCase());
-  const regions = targetRgb ? getShadeMatchRegions() : (color?.regions || (color ? [{ bounds: color.bounds, center: getRegionCenter(color) }] : []));
-
+  const regions = focusedContourId
+    ? allRegions.filter(region => region.id === focusedContourId)
+    : pendingFocusPoint ? [] : allRegions.slice(0, 1);
   if (!regions.length) {
     setCameraChips([]);
-    setFeedback(findResult, `Looking for ${targetShade || targetColor}…`);
+    setFeedback(findResult, focusedContourId ? "Object temporarily lost. Keep it in view or tap another object."
+      : pendingFocusPoint ? "No matching region at that point. Tap the object again." : `Looking for ${targetShade || targetColor}…`);
     return;
   }
 
   const chips = [];
-  regions.slice(0, 8).forEach((region, index) => {
-    drawRegionOutline(region, "#f5e6a1");
+  for (const region of regions) {
+    drawSmoothTargetContour(region.points);
     chips.push({
-      key: `find-${index}`,
+      key: region.id,
       label: targetShade || targetColor,
       color: targetColor,
-      point: getRegionCenter(region),
-      hex: targetRgb ? rgbToHex(targetRgb) : region.hex
+      point: region.center,
+      hex: targetRgb ? rgbToHex(targetRgb) : chipColors[targetColor.toLowerCase()]
     });
-  });
+  }
   setCameraChips(showColorChips ? chips : []);
-  const region = regions[0];
-  setFeedback(findResult, `${targetShade || targetColor} detected · ${getApproximateRegion(region)}`);
+  setFeedback(findResult, focusedContourId ? `Following one ${targetShade || targetColor} object`
+    : `${targetShade || targetColor} · showing the strongest match. Tap to follow another.`);
 }
 
 function drawTaskGuidance() {
@@ -616,25 +678,56 @@ toggleCamBtn.addEventListener("click", async () => {
   toggleCamLabel.textContent = "Starting…";
 
   try {
+    const chosenCamera = cameraDeviceSelect?.value || "";
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" } },
+      video: {
+        ...(chosenCamera ? { deviceId: { exact: chosenCamera } } : { facingMode: { ideal: "environment" } }),
+        width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 }
+      },
       audio: false
     });
 
     video.srcObject = stream;
     await video.play();
+    if (cameraDeviceSelect && navigator.mediaDevices.enumerateDevices) {
+      try {
+        const cameras = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "videoinput");
+        const activeId = stream.getVideoTracks()[0]?.getSettings()?.deviceId || chosenCamera;
+        cameraDeviceSelect.replaceChildren();
+        const fallback = document.createElement("option"); fallback.value = ""; fallback.textContent = "Default";
+        cameraDeviceSelect.append(fallback);
+        cameras.forEach((device, index) => {
+          const option = document.createElement("option"); option.value = device.deviceId;
+          option.textContent = device.label || `Camera ${index + 1}`;
+          cameraDeviceSelect.append(option);
+        });
+        cameraDeviceSelect.value = cameras.some(d => d.deviceId === activeId) ? activeId : "";
+      } catch { /* Some browsers do not enumerate camera names. */ }
+    }
 
     streaming = true;
+    cameraFrame.classList.add("is-live-video");
+    // Native video remains smooth; the canvas is retained for HueFind/HueDo overlays.
+    canvas.width = 320;
+    canvas.height = Math.max(1, Math.round(320 * video.videoHeight / video.videoWidth));
+    steadyReading.reset();
+    pinnedSample = null;
+    lastSampleTime = 0;
+    lastFrameAnalysis = 0;
+    hasScannedScene = false;
+    updatePinState();
     toggleCamBtn.disabled = false;
     toggleCamBtn.setAttribute("aria-pressed", "true");
     toggleCamBtn.classList.add("is-active");
     toggleCamLabel.textContent = "Stop camera";
     colorSelect.disabled = false;
-    taskBtn.disabled = Boolean(activeTask?.completed) || Boolean(activeTask?.canAutoVerify && !streaming);
+    scanSceneBtn.disabled = false;
+    taskBtn.disabled = Boolean(activeTask?.completed) || Boolean(activeTask?.requiresPhotoCheck && !streaming);
     cameraPlaceholder.classList.add("is-hidden");
     setCameraStatus("Camera on", "live");
     detectedLayoutSignature = "__reset__";
     renderDetectedColors([]);
+    setFeedback(readingStatus, "Hover to explore colors. Click or tap to pin a reading.");
     processLoop();
   } catch (error) {
     console.error("Webcam access error:", error);
@@ -643,6 +736,12 @@ toggleCamBtn.addEventListener("click", async () => {
     toggleCamLabel.textContent = "Start camera";
     setCameraStatus("Camera access needed", "error");
   }
+});
+
+cameraDeviceSelect?.addEventListener("change", () => {
+  if (!streaming) return;
+  stopCamera();
+  toggleCamBtn.click();
 });
 
 function stopCamera() {
@@ -658,11 +757,24 @@ function stopCamera() {
   streaming = false;
   latestColors = [];
   currentSample = null;
+  pinnedSample = null;
+  pinnedPosition = null;
+  steadyReading.reset();
   lastSamplePosition = null;
+  lastSampleTime = 0;
+  lastFrameAnalysis = 0;
+  hueSeeRegionStabilizer.reset();
+  hueFindTracker.reset();
+  scanSceneRequested = false;
+  hasScannedScene = false;
+  scanSceneBtn.textContent = "Scan scene";
+  cameraFrame.classList.remove("is-live-video", "has-pinned-reading");
+  updatePinState();
   resetColorDetails();
   detectedLayoutSignature = "__reset__";
   renderDetectedColors([]);
   pointerIsDown = false;
+  pointerStart = null;
   pointerIsOverCanvas = false;
   keyboardSamplingActive = false;
   taskCheckFrames = 0;
@@ -673,12 +785,15 @@ function stopCamera() {
   toggleCamBtn.classList.remove("is-active");
   toggleCamLabel.textContent = "Start camera";
   colorSelect.disabled = true;
+  scanSceneBtn.disabled = true;
   sampleFindBtn.disabled = true;
-  taskBtn.disabled = Boolean(activeTask?.completed) || Boolean(activeTask?.canAutoVerify);
+  taskBtn.disabled = Boolean(activeTask?.completed) || Boolean(activeTask?.requiresPhotoCheck);
 
   cameraPlaceholder.classList.remove("is-hidden");
   sampleIndicator.classList.remove("is-visible", "is-below");
+  sampleReticle.classList.remove("is-visible");
   setCameraChips([]);
+  clearVectorOutline();
   sampleSwatch.style.backgroundColor = "";
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   samplingContext.clearRect(0, 0, samplingCanvas.width, samplingCanvas.height);
@@ -690,45 +805,45 @@ function stopCamera() {
   }
 }
 
-function processLoop() {
+function processLoop(time = 0) {
   if (!streaming) return;
 
   try {
-    const result = analyzeVideoFrame(video, canvas);
-    if (result?.ready) {
-      // analyzeVideoFrame draws the source frame to the canvas.
-      latestColors = result.colors || [];
-      renderDetectedColors(latestColors);
+    // Analyze color regions at a modest cadence, independently of fast cursor sampling.
+    // HueSee shows labels only; HueFind retains the original outlined target regions.
+    const shouldAnalyze = scanSceneRequested || time - lastFrameAnalysis >= (currentMode === "find" && targetColor ? FIND_INTERVAL_MS : FRAME_INTERVAL_MS);
 
-      if (currentMode === "see") {
-        const chips = showColorChips
-          ? latestColors.flatMap((color) => (color.regions || []).map((region, index) => ({
-              key: `see-${color.name}-${index}`,
-              label: color.name,
-              color: color.name,
-              hex: region.hex,
-              point: getRegionCenter(region),
-              samples: region.samples
-            }))).sort((a, b) => b.samples - a.samples).slice(0, 10)
-          : [];
-        setCameraChips(chips);
-      } else if (currentMode === "find" && targetColor) {
-        drawTargetOverlay();
-      } else if (currentMode === "do" && activeTask) {
-        drawTaskGuidance();
-      } else {
-        setCameraChips([]);
-      }
+    if (shouldAnalyze) {
+      lastFrameAnalysis = time;
+      const result = currentMode === "find" && targetColor && !scanSceneRequested
+        ? { ready: true, colors: latestColors }
+        : analyzeVideoFrame(video, analysisCanvas, hueSeeRegionStabilizer);
+      if (result?.ready) {
+        latestColors = result.colors || [];
+        if (scanSceneRequested) {
+          hasScannedScene = true;
+          renderDetectedColors(latestColors);
+          scanSceneBtn.textContent = "Scan scene";
+        }
+        scanSceneRequested = false;
 
-      if ((pointerIsOverCanvas || pointerIsDown || keyboardSamplingActive) && lastSamplePosition) {
-        const source = pointerIsDown ? "touch" : keyboardSamplingActive ? "keyboard" : "pointer";
-        sampleImagePoint(lastSamplePosition, source);
-      }
+        if (currentMode === "see") showHueSeeRegionLabels(latestColors);
+        else if (currentMode === "find" && targetColor) drawTargetOverlay();
+        else if (currentMode === "do" && activeTask) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          drawTaskGuidance();
+        }
+        else setCameraChips([]);
 
-      if (activeTask?.canAutoVerify && !activeTask.completed && !taskCompletionPending) {
-        taskCheckFrames += 1;
-        if (taskCheckFrames % 5 === 0) verifyTaskFrame();
+
       }
+    }
+
+    if (!pinnedSample && (pointerIsOverCanvas || pointerIsDown || keyboardSamplingActive) &&
+        lastSamplePosition && time - lastSampleTime >= SAMPLE_INTERVAL_MS) {
+      const source = pointerIsDown ? "touch" : keyboardSamplingActive ? "keyboard" : "pointer";
+      sampleImagePoint(lastSamplePosition, source);
+      lastSampleTime = time;
     }
   } catch (error) {
     console.error("Camera frame processing error:", error);
@@ -777,11 +892,11 @@ function getStagePositionForImagePoint(x, y) {
   };
 }
 
-function sampleImagePoint(point, source = "pointer") {
-  if (!streaming || !video.videoWidth || !video.videoHeight || !point) return null;
+function sampleImagePoint(point, source = "pointer", { immediate = false } = {}) {
+  if (!streaming || !video.videoWidth || !video.videoHeight || !point || pinnedSample) return null;
 
   try {
-    const width = 320;
+    const width = 240;
     const height = Math.max(1, Math.round(width * video.videoHeight / video.videoWidth));
     if (samplingCanvas.width !== width || samplingCanvas.height !== height) {
       samplingCanvas.width = width;
@@ -791,12 +906,31 @@ function sampleImagePoint(point, source = "pointer") {
     samplingContext.drawImage(video, 0, 0, width, height);
     const pixelX = clamp(Math.floor(point.x * width), 0, width - 1);
     const pixelY = clamp(Math.floor(point.y * height), 0, height - 1);
-    const [r, g, b] = samplingContext.getImageData(pixelX, pixelY, 1, 1).data;
-    const color = classifyColor(r, g, b);
+    const patchSize = 7;
+    const x = Math.max(0, pixelX - 3);
+    const y = Math.max(0, pixelY - 3);
+    const patch = samplingContext.getImageData(
+      x, y, Math.min(patchSize, width - x), Math.min(patchSize, height - y)
+    );
+    const rgb = averagePixelRegion(patch);
+    const raw = classifyColor(rgb.r, rgb.g, rgb.b);
+    const sample = steadyReading.observe(raw, { immediate, position: point });
 
-    currentSample = { ...color, source, position: { x: point.x, y: point.y } };
+    if (!sample) return null;
+    const nextSample = {
+      ...sample,
+      source,
+      position: { x: point.x, y: point.y }
+    };
+
+    const changed = !currentSample || currentSample.hex !== nextSample.hex || currentSample.name !== nextSample.name;
+    currentSample = nextSample;
     lastSamplePosition = point;
-    renderSample(currentSample, point);
+    if (changed) {
+      renderSample(currentSample);
+      // Only change button state when pinning, not on every color sample.
+    }
+    moveSampleIndicator(point);
     return currentSample;
   } catch (error) {
     console.error("Color sample error:", error);
@@ -804,23 +938,91 @@ function sampleImagePoint(point, source = "pointer") {
   }
 }
 
-function renderSample(sample, point) {
+function moveSampleIndicator(point) {
+  if (!point || pinnedSample) return;
+  const width = cameraFrame.clientWidth;
+  const height = cameraFrame.clientHeight;
+  const halfWidth = (sampleIndicator.offsetWidth || 175) / 2 + 8;
+  const left = clamp(point.stageX * width, halfWidth, Math.max(halfWidth, width - halfWidth));
+  const top = clamp(point.stageY * height, 15, Math.max(15, height - 15));
+  sampleIndicator.style.left = `${left}px`;
+  sampleIndicator.style.top = `${top}px`;
+  sampleIndicator.classList.toggle("is-below", point.stageY < .25);
+  sampleIndicator.classList.add("is-visible");
+  sampleReticle.style.left = `${point.stageX * 100}%`;
+  sampleReticle.style.top = `${point.stageY * 100}%`;
+  sampleReticle.classList.add("is-visible");
+}
+
+function renderSample(sample) {
   sampleName.textContent = sample.name;
+  sampleHex.textContent = sample.hex;
+  const { r, g, b } = sample.rgb;
+  sampleRgb.textContent = `RGB ${r}, ${g}, ${b}`;
   sampleSwatch.style.backgroundColor = sample.hex;
   renderColorDetails(sample);
-
-  const frameRect = cameraFrame.getBoundingClientRect();
-  const indicatorWidth = sampleIndicator.offsetWidth || 120;
-  const horizontalPadding = indicatorWidth / 2 + 8;
-  const left = clamp(point.stageX * frameRect.width, horizontalPadding, frameRect.width - horizontalPadding);
-
-  sampleIndicator.style.left = `${left}px`;
-  sampleIndicator.style.top = `${point.stageY * frameRect.height}px`;
-  sampleIndicator.classList.toggle("is-below", point.stageY < 0.18);
-  sampleIndicator.classList.add("is-visible");
-  sampleFindBtn.disabled = !streaming || ["Unknown", "White", "Gray"].includes(sample.name);
-  saveColorBtn.disabled = !streaming || ["Unknown", "White", "Gray"].includes(sample.name);
+  sampleFindBtn.disabled = false;
 }
+
+function updatePinState() {
+  const pinned = Boolean(pinnedSample);
+  cameraFrame.classList.toggle("has-pinned-reading", pinned);
+  pinColorBtn.disabled = !streaming || (!pinned && !currentSample);
+  pinColorBtn.textContent = pinned ? "Unpin reading" : "Pin reading";
+  pinColorBtn.setAttribute("aria-pressed", String(pinned));
+  saveColorBtn.disabled = !streaming || !pinned || pinnedSample?.name === "Unknown";
+  setFeedback(readingStatus, pinned
+    ? `Pinned ${pinnedSample.name} (${pinnedSample.hex}). You can save this snapshot to HueMemory.`
+    : "Hover to explore. Click or tap to pin the color you want to keep.");
+}
+
+function pinReading(point = lastSamplePosition) {
+  if (!streaming) return;
+  if (pinnedSample) {
+    pinnedSample = null;
+    pinnedPosition = null;
+    steadyReading.reset();
+    sampleIndicator.classList.remove("is-visible");
+    sampleReticle.classList.remove("is-visible");
+    updatePinState();
+    return;
+  }
+  if (point) sampleImagePoint(point, "pin", { immediate: true });
+  if (!currentSample) return;
+  pinnedSample = {
+    name: currentSample.name,
+    hex: currentSample.hex,
+    rgb: { ...currentSample.rgb },
+    position: { ...currentSample.position },
+    source: "pin"
+  };
+  pinnedPosition = point ? { ...point } : null;
+  currentSample = pinnedSample;
+  if (pinnedPosition) movePinnedIndicator(pinnedPosition);
+  sampleFindBtn.disabled = pinnedSample.name === "Unknown";
+  updatePinState();
+}
+
+function movePinnedIndicator(point) {
+  // Reuse the same visual cursor, but prevent further hover sampling until unpinned.
+  const width = cameraFrame.clientWidth;
+  const height = cameraFrame.clientHeight;
+  const halfWidth = (sampleIndicator.offsetWidth || 175) / 2 + 8;
+  sampleIndicator.style.left = `${clamp(point.stageX * width, halfWidth, Math.max(halfWidth, width - halfWidth))}px`;
+  sampleIndicator.style.top = `${point.stageY * height}px`;
+  sampleIndicator.classList.toggle("is-below", point.stageY < .25);
+  sampleIndicator.classList.add("is-visible");
+  sampleReticle.style.left = `${point.stageX * 100}%`;
+  sampleReticle.style.top = `${point.stageY * 100}%`;
+  sampleReticle.classList.add("is-visible");
+}
+
+pinColorBtn.addEventListener("click", () => pinReading());
+scanSceneBtn.addEventListener("click", () => {
+  if (!streaming) return;
+  scanSceneRequested = true;
+  scanSceneBtn.textContent = "Scanning…";
+});
 
 function rgbToHsl(r, g, b) {
   const red = r / 255;
@@ -873,13 +1075,15 @@ function renderColorDetails(sample) {
 
   colorPreview.style.backgroundColor = sample.hex;
   colorNameDisplay.textContent = sample.name;
-  colorDescription.textContent = getPlainLanguageDescription(sample, hsl);
+  const nearest = closestReferenceShade(sample.rgb);
+  colorDescription.textContent = getPlainLanguageDescription(sample, hsl) +
+    (nearest ? ` · closest CSS shade: ${nearest}` : "");
   colorHex.textContent = sample.hex;
   colorRgb.textContent = `(${r}, ${g}, ${b})`;
   colorHsl.textContent = `(${hsl.h}°, ${hsl.s}%, ${hsl.l}%)`;
 
   speakDetailsBtn.disabled = false;
-  saveColorBtn.disabled = ["Unknown", "White", "Gray"].includes(sample.name);
+  pinColorBtn.disabled = false;
 }
 
 function resetColorDetails() {
@@ -890,6 +1094,7 @@ function resetColorDetails() {
   colorRgb.textContent = "—";
   colorHsl.textContent = "—";
   speakDetailsBtn.disabled = true;
+  pinColorBtn.disabled = true;
   saveColorBtn.disabled = true;
   setFeedback(saveColorStatus, "");
 }
@@ -922,7 +1127,7 @@ function renderDetectedColors(colors) {
     if (!streaming) {
       const empty = document.createElement("li");
       empty.className = "detected-empty";
-      empty.textContent = "Start the camera to scan the scene.";
+      empty.textContent = "Use Scan scene to analyze visible colors.";
       detectedColorsList.append(empty);
       return;
     }
@@ -930,7 +1135,7 @@ function renderDetectedColors(colors) {
     if (colors.length === 0) {
       const empty = document.createElement("li");
       empty.className = "detected-empty";
-      empty.textContent = "No supported color groups in view.";
+      empty.textContent = hasScannedScene ? "No prominent color groups detected. Move closer and scan again." : "Choose Scan scene for an overview.";
       detectedColorsList.append(empty);
       return;
     }
@@ -966,24 +1171,33 @@ function renderDetectedColors(colors) {
   }
 }
 
-function sampleFromPointer(event) {
+function sampleFromPointer(event, { immediate = false } = {}) {
+  if (!streaming || pinnedSample) return null;
   const point = getImagePoint(event.clientX, event.clientY);
-  if (!point) {
-    lastSamplePosition = null;
-    sampleIndicator.classList.remove("is-visible");
-    return null;
-  }
-
+  if (!point) return null;
+  const previous = lastSamplePosition;
+  const movedFar = Boolean(previous && Math.hypot(point.x - previous.x, point.y - previous.y) > .13);
   keyboardPosition = { x: point.x, y: point.y };
-  sampleImagePoint(point, event.pointerType === "touch" ? "touch" : "pointer");
+  lastSamplePosition = point;
+  moveSampleIndicator(point);
+  const now = performance.now();
+  if (immediate || now - lastSampleTime >= SAMPLE_INTERVAL_MS) {
+    sampleImagePoint(point, event.pointerType === "touch" ? "touch" : "pointer", { immediate: immediate || movedFar });
+    lastSampleTime = now;
+  }
   return point;
 }
 
 canvas.addEventListener("pointerenter", (event) => {
-  if (event.pointerType === "mouse") pointerIsOverCanvas = true;
+  if (currentMode !== "see") return;
+  if (event.pointerType === "mouse") {
+    pointerIsOverCanvas = true;
+    sampleFromPointer(event);
+  }
 });
 
 canvas.addEventListener("pointermove", (event) => {
+  if (currentMode !== "see" || pinnedSample) return;
   if (event.pointerType === "mouse") {
     pointerIsOverCanvas = Boolean(sampleFromPointer(event));
   } else if (pointerIsDown) {
@@ -993,73 +1207,103 @@ canvas.addEventListener("pointermove", (event) => {
 
 canvas.addEventListener("pointerdown", (event) => {
   if (!streaming) return;
+  if (currentMode === "find") {
+    const point = getImagePoint(event.clientX, event.clientY);
+    if (point) focusHueFindAt(point);
+    if (event.pointerType !== "mouse") event.preventDefault();
+    return;
+  }
   pointerIsDown = true;
+  pointerStart = { x: event.clientX, y: event.clientY, time: performance.now() };
   keyboardSamplingActive = false;
   canvas.focus({ preventScroll: true });
   if (event.pointerType !== "mouse") event.preventDefault();
   if (canvas.setPointerCapture) canvas.setPointerCapture(event.pointerId);
-  sampleFromPointer(event);
+  sampleFromPointer(event, { immediate: true });
 });
 
 function finishPointerSample(event) {
+  if (currentMode === "find") return;
+  const start = pointerStart;
   pointerIsDown = false;
+  pointerStart = null;
   if (event?.pointerType !== "mouse") pointerIsOverCanvas = false;
-  if (currentSample) announceSample(currentSample);
+  const isTap = start && Math.hypot(event.clientX - start.x, event.clientY - start.y) <= 13 &&
+    performance.now() - start.time < 520;
+  if (isTap) {
+    if (!pinnedSample) sampleFromPointer(event, { immediate: true });
+    pinReading(lastSamplePosition);
+  } else if (currentSample && !pinnedSample) {
+    // Dragging explores the view; it does not accidentally pin.
+    sampleIndicator.classList.remove("is-visible");
+    sampleReticle.classList.remove("is-visible");
+  }
 }
 
 canvas.addEventListener("pointerup", finishPointerSample);
-canvas.addEventListener("pointercancel", finishPointerSample);
+canvas.addEventListener("pointercancel", () => { pointerIsDown = false; pointerStart = null; });
 
 canvas.addEventListener("pointerleave", (event) => {
   if (event.pointerType === "mouse" && !pointerIsDown) {
     pointerIsOverCanvas = false;
-    lastSamplePosition = null;
-    sampleIndicator.classList.remove("is-visible");
+    if (!pinnedSample) {
+      lastSamplePosition = null;
+      sampleIndicator.classList.remove("is-visible");
+      sampleReticle.classList.remove("is-visible");
+      steadyReading.reset();
+    }
   }
 });
 
 canvas.addEventListener("focus", () => {
-  if (!streaming || pointerIsDown) return;
-  keyboardPosition = { x: 0.5, y: 0.5 };
+  if (!streaming || pointerIsDown || pinnedSample) return;
+  keyboardPosition = { x: .5, y: .5 };
   keyboardSamplingActive = true;
-  sampleImagePoint({
-    ...keyboardPosition,
-    ...getStagePositionForImagePoint(keyboardPosition.x, keyboardPosition.y)
-  }, "keyboard");
+  const point = { ...keyboardPosition, ...getStagePositionForImagePoint(keyboardPosition.x, keyboardPosition.y) };
+  lastSamplePosition = point;
+  sampleImagePoint(point, "keyboard", { immediate: true });
 });
 
 canvas.addEventListener("keydown", (event) => {
   if (!streaming) return;
+  if (event.key === "Escape" && pinnedSample) {
+    event.preventDefault();
+    pinReading();
+    return;
+  }
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    if (currentMode === "find") focusHueFindAt({ ...keyboardPosition, ...getStagePositionForImagePoint(keyboardPosition.x, keyboardPosition.y) });
+    else pinReading();
+    return;
+  }
+  if (pinnedSample) return;
 
-  const step = event.shiftKey ? 0.1 : 0.025;
+  const step = event.shiftKey ? .10 : .025;
   let moved = true;
-
   switch (event.key) {
     case "ArrowLeft": keyboardPosition.x = clamp(keyboardPosition.x - step, 0, 1); break;
     case "ArrowRight": keyboardPosition.x = clamp(keyboardPosition.x + step, 0, 1); break;
     case "ArrowUp": keyboardPosition.y = clamp(keyboardPosition.y - step, 0, 1); break;
     case "ArrowDown": keyboardPosition.y = clamp(keyboardPosition.y + step, 0, 1); break;
-    case "Enter":
-    case " ":
-      event.preventDefault();
-      if (currentSample) announceSample(currentSample);
-      return;
     default: moved = false;
   }
-
   if (moved) {
     event.preventDefault();
     keyboardSamplingActive = true;
-    sampleImagePoint({
-      ...keyboardPosition,
-      ...getStagePositionForImagePoint(keyboardPosition.x, keyboardPosition.y)
-    }, "keyboard");
+    steadyReading.reset();
+    const point = { ...keyboardPosition, ...getStagePositionForImagePoint(keyboardPosition.x, keyboardPosition.y) };
+    lastSamplePosition = point;
+    sampleImagePoint(point, "keyboard", { immediate: true });
   }
 });
 
 canvas.addEventListener("blur", () => {
   keyboardSamplingActive = false;
-  if (!pointerIsOverCanvas && !pointerIsDown) sampleIndicator.classList.remove("is-visible");
+  if (!pinnedSample && !pointerIsOverCanvas && !pointerIsDown) {
+    sampleIndicator.classList.remove("is-visible");
+    sampleReticle.classList.remove("is-visible");
+  }
 });
 
 function announceSample(sample) {
@@ -1071,17 +1315,18 @@ speakDetailsBtn.addEventListener("click", () => {
 });
 
 saveColorBtn.addEventListener("click", async () => {
-  if (!currentSample || saveColorBtn.disabled) return;
+  if (!pinnedSample || saveColorBtn.disabled) return;
   saveColorBtn.disabled = true;
+  const snapshot = { ...pinnedSample, rgb: { ...pinnedSample.rgb }, shade: `${pinnedSample.name} ${pinnedSample.hex}` };
   setFeedback(saveColorStatus, "Saving…");
   try {
-    await saveColor(currentSample);
-    setFeedback(saveColorStatus, `${currentSample.name} saved to HueMemory.`);
-    speak(`${currentSample.name} saved to your color palette.`);
+    await saveColor(snapshot);
+    setFeedback(saveColorStatus, `${snapshot.name} ${snapshot.hex} saved to HueMemory.`);
+    speak(`${snapshot.name} saved to your color palette.`);
   } catch (error) {
     setFeedback(saveColorStatus, error.message || "Could not save this color.");
   } finally {
-    saveColorBtn.disabled = !currentSample || ["Unknown", "White", "Gray"].includes(currentSample.name);
+    saveColorBtn.disabled = !pinnedSample || pinnedSample.name === "Unknown";
   }
 });
 
@@ -1100,9 +1345,11 @@ textSizeToggle.addEventListener("click", () => {
 colorChipToggle.addEventListener("click", () => {
   showColorChips = !showColorChips;
   colorChipToggle.setAttribute("aria-pressed", String(showColorChips));
-  colorChipToggle.setAttribute("aria-label", showColorChips ? "Hide color chips" : "Show color chips");
-  colorChipToggle.title = showColorChips ? "Hide color chips" : "Show color chips";
-  if (!showColorChips) setCameraChips([]);
+  colorChipToggle.setAttribute("aria-label", showColorChips ? "Hide detected color labels" : "Show detected color labels");
+  colorChipToggle.title = showColorChips ? "Hide detected color labels" : "Show detected color labels";
+  if (colorChipToggleText) colorChipToggleText.textContent = showColorChips ? "Hide color labels" : "Show color labels";
+  if (currentMode === "see") showHueSeeRegionLabels(latestColors);
+  else if (!showColorChips) setCameraChips([]);
 });
 
 function setFindTarget(value, shouldSpeak = true, colorReference = null) {
@@ -1111,7 +1358,13 @@ function setFindTarget(value, shouldSpeak = true, colorReference = null) {
   targetRgb = colorReference?.rgb || null;
   targetShade = colorReference?.shade || "";
   colorSelect.value = normalized;
+  hueFindTracker.reset();
+  focusedContourId = null;
+  pendingFocusPoint = null;
   if (!normalized) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    clearVectorOutline();
+    setCameraChips([]);
     targetRgb = null;
     targetShade = "";
     setFeedback(findResult, "Choose a target to begin.");
@@ -1122,6 +1375,59 @@ function setFindTarget(value, shouldSpeak = true, colorReference = null) {
   if (shouldSpeak) speak(`Finding ${label}`);
 }
 
+// A point selects a particular real-world region instead of every patch of that color.
+function focusHueFindAt(point) {
+  if (!streaming || !point || video.readyState < 2) return;
+  if (!targetColor) {
+    // Read directly from the camera; a color pinned earlier in HueSee must not
+    // block the selection of a new HueFind target.
+    const width = 320, height = Math.max(1, Math.round(width * video.videoHeight / video.videoWidth));
+    samplingCanvas.width = width; samplingCanvas.height = height;
+    samplingContext.drawImage(video, 0, 0, width, height);
+    const x = clamp(Math.round(point.x * width) - 4, 0, Math.max(0, width - 9));
+    const y = clamp(Math.round(point.y * height) - 4, 0, Math.max(0, height - 9));
+    const rgb = averagePixelRegion(samplingContext.getImageData(x, y, 9, 9));
+    const sample = classifyColor(rgb.r, rgb.g, rgb.b);
+    if (!normalizeColorCategory(sample.name)) {
+      setFeedback(findResult, "Choose a color first, or tap a colorful object."); return;
+    }
+    setFindTarget(sample.name, false, { rgb, shade: sample.name });
+  }
+  focusedContourId = null;
+  pendingFocusPoint = { x: point.x * (canvas.width || 320), y: point.y * (canvas.height || 240) };
+  hueFindTracker.reset();
+  setFeedback(findResult, `Selecting a ${targetShade || targetColor} region…`);
+  drawTargetOverlay();
+}
+
+focusResetBtn?.addEventListener("click", () => {
+  focusedContourId = null; pendingFocusPoint = null; hueFindTracker.reset();
+  setFeedback(findResult, "Following the strongest matching region. Tap an object to focus it.");
+});
+calibrateBtn?.addEventListener("click", () => {
+  if (neutralGains) {
+    neutralGains = null; calibrateBtn.textContent = "Calibrate from white card";
+    calibrationStatus.textContent = "Calibration cleared. Camera uses its default color response.";
+    hueFindTracker.reset(); focusedContourId = null; pendingFocusPoint = null;
+    return;
+  }
+  if (!streaming || video.readyState < 2) {
+    calibrationStatus.textContent = "Start the camera, then hold a white card at its center."; return;
+  }
+  const width = 320, height = Math.round(width * video.videoHeight / video.videoWidth);
+  samplingCanvas.width = width; samplingCanvas.height = height;
+  samplingContext.drawImage(video, 0, 0, width, height);
+  const neutral = neutralReferenceFromCenter(samplingContext.getImageData(0, 0, width, height));
+  const gains = calculateNeutralGains(neutral || {});
+  if (!gains) {
+    calibrationStatus.textContent = "No usable neutral card detected at center. Try plain white or gray paper with even light.";
+    return;
+  }
+  neutralGains = gains; calibrateBtn.textContent = "Reset lighting calibration";
+  calibrationStatus.textContent = "Neutral-card correction on for HueFind matching. Camera image and saved HEX remain unaltered.";
+  hueFindTracker.reset(); focusedContourId = null; pendingFocusPoint = null;
+});
+
 colorSelect.addEventListener("change", (event) => setFindTarget(event.target.value));
 sampleFindBtn.addEventListener("click", () => {
   if (currentSample) setFindTarget(currentSample.name, true, { ...currentSample, shade: currentSample.name });
@@ -1131,6 +1437,9 @@ clearFindBtn.addEventListener("click", () => {
   targetRgb = null;
   targetShade = "";
   colorSelect.value = "";
+  clearVectorOutline();
+  focusedContourId = null; pendingFocusPoint = null;
+  hueFindTracker.reset();
   setFeedback(findResult, "Choose a target to begin.");
 });
 
@@ -1215,22 +1524,30 @@ interpretBtn.addEventListener("click", async () => {
       color: result.targetColor || "",
       object: result.targetObject || "",
       action: result.action || "",
-      destination: result.destination || ""
+      destination: result.destination || "",
+      relation: result.relation || "",
+      answer: result.answer || "",
+      locations: Array.isArray(result.locations) ? result.locations : []
     };
     taskSummaryInput.value = pendingTaskDraft.summary;
     renderTaskDraftPreview(pendingTaskDraft);
     parsedTask.hidden = false;
-    setFeedback(interpretStatus, "Guide ready to review.");
+    setFeedback(interpretStatus, result.answer
+      ? `Guide ready. ${result.answer}`
+      : "Guide ready to review.");
   } catch (error) {
     const fallbackSummary = text || "Follow the instruction in the attached photo.";
+    const parsed = text ? parseInstruction(text) : {};
+    const steps = text ? buildGuideSteps(parsed).map(step => step.text) : [fallbackSummary];
     pendingTaskDraft = {
       summary: fallbackSummary,
-      steps: [fallbackSummary],
+      steps,
       visualCues: [],
-      color: "",
-      object: "",
-      action: "",
-      destination: ""
+      color: parsed.color || "",
+      object: parsed.object || "",
+      action: parsed.action || "",
+      destination: parsed.destination || "",
+      relation: parsed.relation || ""
     };
     taskSummaryInput.value = fallbackSummary;
     renderTaskDraftPreview(pendingTaskDraft);
@@ -1256,11 +1573,15 @@ saveTaskBtn.addEventListener("click", async () => {
   saveTaskBtn.disabled = true;
   saveTaskBtn.textContent = "Saving…";
   try {
-    const saved = await createTask(draft);
+    // Local demo intentionally cannot write to account-owned MongoDB records.
+    const isDemo = Boolean(window.hueDemoMode);
+    const saved = isDemo ? { ...draft, completed: false } : await createTask(draft);
     setActiveTask(saved);
     setActiveMode("do");
-    await refreshTaskLibrary();
-    setFeedback(interpretStatus, "Visual guide is ready in the camera view.");
+    if (!isDemo) await refreshTaskLibrary();
+    setFeedback(interpretStatus, isDemo
+      ? "Guide ready for this demo. It won't be stored until you sign in."
+      : "Visual guide is ready in the camera view.");
     speak(draft.summary);
   } catch (error) {
     setFeedback(interpretStatus, error.message || "Could not save the guide.");
@@ -1301,7 +1622,10 @@ function setActiveTask(task) {
     visualCues,
     normalizedColor,
     zoneKey,
-    canAutoVerify: Boolean(normalizedColor && zoneKey)
+    // Never auto-mark a task complete just because matching colors are visible
+    // inside an assumed zone. Completion checking is explicitly photo-based.
+    canAutoVerify: false,
+    requiresPhotoCheck: Boolean(task.destination && (task.object || task.color))
   };
 
   taskSuccessStreak = 0;
@@ -1322,15 +1646,13 @@ function setActiveTask(task) {
   targetShade = "";
   colorSelect.value = targetColor;
   colorSelect.disabled = !streaming;
-  taskBtn.disabled = Boolean(task.completed) || Boolean(activeTask.canAutoVerify && !streaming);
-  taskBtn.textContent = task.completed ? "Completed" : activeTask.canAutoVerify ? "Check placement" : "Mark complete";
+  taskBtn.disabled = Boolean(task.completed) || Boolean(activeTask.requiresPhotoCheck && !streaming);
+  taskBtn.textContent = task.completed ? "Completed" : activeTask.requiresPhotoCheck ? "Check with camera" : "Mark complete";
   setFeedback(taskResult, task.completed
     ? "This guide is complete."
-    : activeTask.canAutoVerify
-      ? "Camera is checking the target color in the named area."
-      : streaming
-        ? "Follow the visual cues, then confirm when finished."
-        : "Start the camera to show visual cues.");
+    : activeTask.requiresPhotoCheck
+      ? "Move the object, then use Check with camera for Gemini's assessment."
+      : "Follow the steps, then mark complete when you're ready.");
   if (task.completed) taskStateMark.textContent = "✓";
 }
 
@@ -1406,34 +1728,68 @@ function verifyTaskFrame() {
   }
 }
 
-taskBtn.addEventListener("click", () => {
-  if (!activeTask || activeTask.completed) return;
-  if (!activeTask.canAutoVerify) {
-    completeActiveTask(false);
+// Capture a fresh frame from whichever camera the user selected, including Camo.
+// This is sent only when the user explicitly presses Check with camera.
+function captureHueDoPhoto() {
+  if (!streaming || !video.videoWidth || !video.videoHeight) {
+    throw new Error("Start your camera (Camo is supported) before checking the task.");
+  }
+  const photo = document.createElement("canvas");
+  photo.width = Math.min(960, video.videoWidth);
+  photo.height = Math.round(photo.width * video.videoHeight / video.videoWidth);
+  photo.getContext("2d").drawImage(video, 0, 0, photo.width, photo.height);
+  return { mimeType: "image/jpeg", data: photo.toDataURL("image/jpeg", 0.83).split(",")[1] };
+}
+
+taskBtn.addEventListener("click", async () => {
+  if (!activeTask || activeTask.completed || taskCompletionPending) return;
+  if (!activeTask.requiresPhotoCheck) {
+    await completeActiveTask(false);
     return;
   }
-  if (!streaming) return;
 
-  const result = sampleColorInDestination();
-  if (result.found) {
-    setFeedback(taskResult, `Target found in ${activeTask.zoneKey}. Holding for confirmation…`);
-    speak(`${activeTask.color || activeTask.normalizedColor} detected in ${activeTask.zoneKey}.`);
-  } else {
-    setFeedback(taskResult, `Target not confirmed in ${activeTask.zoneKey}.`);
-    speak(`The target was not confirmed in ${activeTask.zoneKey}.`);
+  taskCompletionPending = true;
+  taskBtn.disabled = true;
+  taskBtn.textContent = "Checking picture…";
+  setFeedback(taskResult, "Gemini is checking the current camera picture…");
+  try {
+    const image = captureHueDoPhoto();
+    const task = {
+      summary: activeTask.summary,
+      target: [activeTask.color, activeTask.object].filter(Boolean).join(" ").trim(),
+      destination: activeTask.destination
+    };
+    const result = await checkTask(image, task);
+    const message = result.message || (result.done ? "Task appears complete." : "Task not yet confirmed.");
+    if (result.done === true) {
+      // Gemini is an assessment of visible evidence; no automatic pixel-zone verification.
+      await completeActiveTask(true);
+      setFeedback(taskResult, `Gemini assessment: ${message} Check the result yourself.`);
+    } else {
+      setFeedback(taskResult, `Gemini assessment: ${message}`);
+      speak(message);
+    }
+  } catch (error) {
+    setFeedback(taskResult, error.message || "Could not check the camera picture.");
+  } finally {
+    taskCompletionPending = false;
+    if (activeTask && !activeTask.completed) {
+      taskBtn.disabled = !streaming;
+      taskBtn.textContent = "Check with camera";
+    }
   }
 });
 
 async function completeActiveTask(cameraVerified = false) {
-  if (!activeTask || taskCompletionPending) return;
+  if (!activeTask || activeTask.completed) return;
   taskCompletionPending = true;
   activeTask.completed = true;
   taskStateMark.textContent = "✓";
   taskStateMark.style.color = "var(--success)";
   taskBtn.disabled = true;
   taskBtn.textContent = "Completed";
-  setFeedback(taskResult, cameraVerified ? "Task verified by the camera." : "Task marked complete.");
-  speak(cameraVerified ? "Task completed and verified." : "Task marked complete.");
+  setFeedback(taskResult, cameraVerified ? "Gemini's picture check suggests completion; verify the result yourself." : "Task marked complete.");
+  speak(cameraVerified ? "Gemini says the task appears complete." : "Task marked complete.");
 
   if (activeTask._id) {
     try {
@@ -1550,3 +1906,28 @@ window.addEventListener("pagehide", () => {
   if (streaming) stopCamera();
   if (instructionImageUrl) URL.revokeObjectURL(instructionImageUrl);
 });
+
+// The editorial page is one continuous document; these links open the existing
+// working mode panels without creating separate camera streams.
+document.querySelectorAll("[data-open-mode]").forEach((link) => {
+  link.addEventListener("click", () => setActiveMode(link.dataset.openMode));
+});
+
+const f1Reveals = [...document.querySelectorAll(".f1-reveal")];
+if ("IntersectionObserver" in window && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  const observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) if (entry.isIntersecting) {
+      entry.target.classList.add("is-shown");
+      observer.unobserve(entry.target);
+    }
+  }, { threshold: 0.06 });
+  f1Reveals.forEach((element) => observer.observe(element));
+} else f1Reveals.forEach((element) => element.classList.add("is-shown"));
+
+const scrollProgress = document.getElementById("scrollProgress");
+function updateScrollProgress() {
+  const range = document.documentElement.scrollHeight - window.innerHeight;
+  if (scrollProgress) scrollProgress.style.width = `${range > 0 ? window.scrollY / range * 100 : 0}%`;
+}
+window.addEventListener("scroll", updateScrollProgress, { passive: true });
+updateScrollProgress();

@@ -1,0 +1,141 @@
+/* HueSee: calm color exploration layered over the complete camera workspace. */
+:root {
+  --page: #f6f3eb;
+  --surface: #fffdf8;
+  --surface-soft: #f9f6ef;
+  --surface-tint: #efe9de;
+  --ink: #272923;
+  --muted: #67685e;
+  --subtle: #818278;
+  --line: #e6dfd3;
+  --line-strong: #d1c8ba;
+  --brand: #35564b;
+  --brand-deep: #254136;
+  --brand-soft: #e8efe8;
+  --accent: #cf6551;
+  --focus: #b45539;
+}
+
+body {
+  background:
+    radial-gradient(circle at 4% 10%, rgba(207, 101, 81, .06), transparent 28rem),
+    radial-gradient(circle at 89% 66%, rgba(91, 139, 111, .07), transparent 35rem),
+    var(--page);
+}
+
+.site-header { background: rgba(246, 243, 235, .92); }
+.brand { letter-spacing: -.045em; font-size: 15px; }
+.brand-mark { border-radius: 8px; background: #d96650; }
+.camera-stage { border-radius: 20px; }
+.mode-panel { border-radius: 20px; }
+.panel-heading h1 { letter-spacing: -.052em; }
+
+/* The actual webcam video is always fluid. The canvas remains a transparent
+   pointer layer in HueSee and continues serving overlays in HueFind/HueDo. */
+.camera-source {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  opacity: 1;
+  overflow: hidden;
+  object-fit: contain;
+  background: #101916;
+  pointer-events: none;
+}
+.camera-stage.is-see-mode #outputCanvas { opacity: 0; }
+.camera-stage.is-see-mode #colorChipToggle { display: none; }
+.camera-stage.is-see-mode .camera-chip-layer { display: none; }
+#outputCanvas { transition: opacity .16s ease; }
+
+/* A single calm hover color card replaces the jumping region overlays. */
+.sample-indicator {
+  z-index: 7;
+  display: flex;
+  visibility: hidden;
+  opacity: 0;
+  min-width: 172px;
+  max-width: min(236px, calc(100% - 20px));
+  gap: 10px;
+  padding: 10px 12px 10px 10px;
+  border: 1px solid rgba(255,255,255,.2);
+  border-radius: 13px;
+  background: rgba(23,28,26,.94);
+  box-shadow: 0 9px 30px rgba(0,0,0,.25);
+  backdrop-filter: blur(18px);
+  white-space: normal;
+  transition: opacity .18s ease, visibility .18s ease, left .065s linear, top .065s linear;
+}
+.sample-indicator.is-visible { display: flex; visibility: visible; opacity: 1; }
+.sample-indicator-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; font-variant-numeric: tabular-nums; }
+.sample-indicator-copy strong { font-size: 13px; font-weight: 800; letter-spacing: -.02em; line-height: 1.05; }
+.sample-indicator-hex { font: 700 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; color: #f8e5be; }
+.sample-indicator-rgb { font: 500 10px/1.25 ui-monospace, SFMono-Regular, Consolas, monospace; color: #deded6; }
+.sample-swatch { width: 29px; height: 29px; flex: 0 0 29px; border: 2px solid rgba(255,255,255,.9); border-radius: 8px; transition: background-color .32s ease; }
+.sample-pin-icon { display: none; align-self: flex-start; padding: 2px 4px; border-radius: 3px; color: #292923; background: #f6c896; font-size: 8px; line-height: 1.2; letter-spacing: .08em; }
+.camera-stage.has-pinned-reading .sample-pin-icon { display: inline-flex; }
+.camera-stage.has-pinned-reading .sample-indicator { border-color: #f6c896; }
+.sample-reticle {
+  position: absolute;
+  z-index: 6;
+  display: block;
+  width: 27px;
+  height: 27px;
+  border: 2px solid white;
+  border-radius: 50%;
+  transform: translate(-50%, -50%) scale(.75);
+  box-shadow: 0 0 0 2px rgba(0,0,0,.65), 0 0 0 7px rgba(255,255,255,.1);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity .16s ease, transform .16s ease, left .065s linear, top .065s linear;
+}
+.sample-reticle::after { position: absolute; inset: 9px; border-radius: 50%; background: white; content: ""; }
+.sample-reticle.is-visible { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+.camera-stage.has-pinned-reading .sample-reticle { border-color: #f6c896; box-shadow: 0 0 0 2px rgba(0,0,0,.65), 0 0 0 7px rgba(246,200,150,.2); }
+
+.color-preview { transition: background-color .32s ease; }
+.color-values dd { font-variant-numeric: tabular-nums; }
+.reading-instructions { margin: 14px 0 0; font-size: 12px; line-height: 1.55; color: var(--muted); }
+.reading-status { min-height: 2.6em; margin: 10px 0 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
+.huesee-actions { grid-template-columns: 1fr 1fr; gap: 8px; }
+.huesee-actions #saveColorBtn { grid-column: 1 / -1; width: 100%; }
+.huesee-actions #pinColorBtn[aria-pressed="true"] { background: #d66a4c; color: #fff; }
+.huesee-actions .button:hover:not(:disabled) { transform: none; }
+.scene-button { min-height: 31px; padding: 6px 9px; font-size: 10px; }
+.detected-section { margin-top: 12px; }
+.detected-color-list { margin-top: 10px; }
+#huesee .selected-color-name { font-size: 28px; }
+
+@media (max-width: 600px) {
+  .brand { font-size: 13px; }
+  .sample-indicator { min-width: 154px; padding: 8px 10px; }
+  .sample-indicator-copy strong { font-size: 12px; }
+  .sample-indicator-hex { font-size: 10px; }
+  .sample-indicator-rgb { font-size: 9px; }
+  .reading-instructions { font-size: 11px; }
+  .reading-status { font-size: 10px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sample-indicator, .sample-reticle, .sample-swatch, .color-preview { transition: none !important; }
+}
+
+body.high-contrast .sample-indicator { background: #000; border: 2px solid white; }
+body.high-contrast .sample-reticle { box-shadow: 0 0 0 3px black, 0 0 0 6px white; }
+
+/* Larger, more legible HueSee readouts than the original compact dashboard. */
+#huesee .selected-label { font-size: 10px; }
+#huesee .selected-color-description { font-size: 12px; }
+#huesee .value-row dt { font-size: 11px; }
+#huesee .value-row dd { font-size: 12px; }
+#huesee .value-row { min-height: 40px; }
+#huesee .panel-actions .button { font-size: 12px; }
+#huesee .subsection-heading h2 { font-size: 15px; }
+#huesee .detected-color-name { font-size: 12px; }
+#huesee .detected-color-region { font-size: 11px; }
+#huesee .detected-color-meta { font-size: 10px; }
+@media (max-width: 600px) {
+ #huesee .value-row dd { font-size: 12px; }
+}

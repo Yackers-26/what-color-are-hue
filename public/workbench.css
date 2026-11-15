@@ -1,0 +1,95 @@
+/* Original F1 camera workspace + right inspector; no landing page. */
+body { min-height: 100svh; background: #f7f4ec; }
+.site-header { position: relative; }
+.f1-header-inner { max-width: 1320px; margin: auto; }
+.workspace-id { margin-left: auto; padding-right: 20px; font: 700 10px/1.4 "DM Sans",sans-serif; letter-spacing: .16em; color: #71766e; }
+.camera-page { max-width: 1320px; margin: 0 auto; padding: clamp(20px, 3vw, 45px) 0 54px; }
+.page-heading { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 25px; }
+.page-eyebrow { display: block; margin-bottom: 6px; color: #6c756c; font: 700 10px/1.4 "DM Sans",sans-serif; letter-spacing: .14em; }
+.page-heading h1 { margin: 0; font: 400 clamp(45px,6vw,76px)/.97 "DM Sans",sans-serif; letter-spacing: -.075em; color: #242824; }
+.page-heading h1 span { color: #d56651; font: italic 400 1.07em/.9 "Instrument Serif",Georgia,serif; letter-spacing: -.035em; }
+.page-heading p { margin: 0 0 6px; color: #676e64; font-size: 13px; }
+#workspace .workspace-grid { min-height: 580px; }
+#workspace .camera-stage { min-height: min(65vh,560px); }
+/* Region LABELS only in HueSee. The canvas stays hidden here and can draw HueFind outlines when the mode changes. */
+#workspace .camera-stage.is-see-mode #outputCanvas { opacity: 0; }
+#workspace .camera-stage.is-see-mode .camera-chip-layer { display: block !important; }
+#workspace .camera-stage.is-see-mode #colorChipToggle { display: inline-flex !important; }
+#workspace .camera-stage.is-see-mode .camera-chip { border: 1px solid rgba(255,255,255,.5); border-radius: 4px; background: rgba(25,31,27,.86); box-shadow: 0 3px 10px #0003; backdrop-filter: none; font: 700 11px/1.1 "DM Sans",sans-serif; }
+#workspace .camera-stage.is-see-mode .camera-chip .camera-chip-dot { border-radius: 2px; }
+#workspace .camera-stage.is-see-mode .camera-chip-layer { pointer-events: none; }
+#workspace .camera-stage.is-see-mode .camera-chip { transition: left .16s linear, top .16s linear; }
+/* Leave mode switching exactly as in the previous four-tab right-sidebar workspace. */
+#workspace .mode-panel { min-width: 0; }
+@media (max-width: 900px) {
+  .workspace-id { display: none; }
+  .camera-page { padding: 18px 0 32px; }
+  .page-heading { padding: 0 5px; }
+  #workspace .workspace-grid { grid-template-columns: 1fr; }
+  #workspace .camera-column { border-right: 0; border-bottom: 1px solid #e1dbd0; }
+  #workspace .camera-stage { min-height: 390px; aspect-ratio: 1.38; }
+}
+@media (max-width: 560px) {
+  .page-heading h1 { font-size: 46px; }
+  .page-heading p { font-size: 11px; text-align: right; max-width: 135px; }
+  #workspace .camera-stage { min-height: 315px; aspect-ratio: auto; }
+  #workspace .camera-chip { max-width: 42%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #workspace .camera-chip { transition: none; animation: none; opacity: 1; }
+}
+
+/* Explicit camera control: no unlabeled circle or hover-only explanation. */
+#workspace #colorChipToggle.camera-label-toggle {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 38px;
+  min-width: 150px;
+  padding: 7px 11px;
+  border: 1px solid rgba(255, 255, 255, .32);
+  border-radius: 4px;
+  color: #fffdf6;
+  background: rgba(30, 39, 34, .91);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .14);
+  font: 700 11px/1.3 "DM Sans", sans-serif;
+  white-space: nowrap;
+  cursor: pointer;
+}
+#workspace #colorChipToggle.camera-label-toggle:hover { background: #3c4941; }
+#workspace #colorChipToggle.camera-label-toggle:focus-visible { outline: 3px solid #f4c78c; outline-offset: 3px; }
+#workspace #colorChipToggle.camera-label-toggle[aria-pressed="false"] { opacity: 1; }
+.camera-label-toggle-icon { font-size: 15px; line-height: 1; }
+/* Keep webcam in its native video element, with a transparent HueFind drawing layer. */
+#workspace .camera-stage #outputCanvas { background: transparent; }
+@media (max-width: 560px) {
+  #workspace .camera-topbar { align-items: flex-start; }
+  #workspace .camera-top-actions { flex-wrap: wrap; justify-content: flex-end; max-width: 70%; }
+  #workspace #colorChipToggle.camera-label-toggle { min-height: 32px; min-width: 130px; padding: 5px 8px; font-size: 10px; }
+}
+
+/* Account controls use the same understated visual language as the existing workspace. */
+.account-divider{display:block;height:24px;border-left:1px solid #d7d4c9;margin:0 4px}
+.account-name{font:600 11px/1.3 "DM Sans",sans-serif;max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#3e4a40}
+.signout-button{font-size:11px!important;white-space:nowrap}
+@media(max-width:760px){.account-divider,.account-name{display:none}.signout-button{padding:8px!important}}
+
+/* Vision reliability controls: keep form controls readable and lightweight. */
+.camera-source-picker { display:inline-flex; align-items:center; gap:.4rem; color:#fff; font-size:.75rem; font-weight:650;
+  background:rgba(26,35,30,.84); border-radius:3px; padding:0.36rem .5rem; }
+.camera-source-picker select { max-width:145px; border:1px solid rgba(255,255,255,.35); background:#f8f6ee;
+  color:#202923; border-radius:2px; padding:.32rem; font:inherit; }
+.find-focus-instruction { font-size:.85rem; line-height:1.5; color:#656962; margin:.3rem 0 .7rem; }
+@media (max-width: 680px) { .camera-source-picker { max-width:150px; } .camera-source-picker select { max-width:100px; }
+  .camera-top-actions { flex-wrap:wrap; justify-content:flex-end; } }
+
+/* HueFind uses crisp SVG strokes, not a low-resolution raster overlay. */
+#workspace .camera-stage .hue-find-vector-overlay { position:absolute; inset:0; display:block; width:100%; height:100%;
+  z-index:3; pointer-events:none; overflow:visible; }
+#workspace .camera-stage .hue-find-contour-shadow,
+#workspace .camera-stage .hue-find-contour { fill:none; stroke-linecap:round; stroke-linejoin:round;
+  vector-effect:non-scaling-stroke; }
+#workspace .camera-stage .hue-find-contour-shadow { stroke:rgba(17,24,21,.89); stroke-width:5; }
+#workspace .camera-stage .hue-find-contour { stroke:#f7e7ab; stroke-width:2.65; }
+#workspace .camera-stage.is-see-mode .hue-find-vector-overlay { display:none; }
