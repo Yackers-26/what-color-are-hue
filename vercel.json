@@ -1,0 +1,11 @@
+
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "express",
+  "buildCommand": "cp -R src public/",
+  "functions": {
+    "index.js": {
+      "includeFiles": "public/**"
+    }
+  }
+}
