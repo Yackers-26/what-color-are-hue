@@ -45,7 +45,7 @@ export function classifyColor(r, g, b) {
 
 const SAMPLE_STEP = 4;
 const MIN_REGION_SAMPLES = 7;
-const COLOR_NAMES = ["Red", "Orange", "Yellow", "Green", "Cyan", "Blue", "Purple", "Black"];
+const COLOR_NAMES = ["Red", "Orange", "Yellow", "Green", "Cyan", "Blue", "Purple", "Black", "Gray"];
 const COLOR_IDS = new Map(COLOR_NAMES.map((name, index) => [name, index]));
 
 /**
@@ -457,7 +457,7 @@ export function summarizeFrameColors(imageData, stabilizer = null) {
       sampledRgb[cellIndex * 3 + 2] = blue;
 
       const result = classifyColor(red, green, blue);
-      if (result.name === "White" || result.name === "Gray" || result.name === "Unknown") continue;
+      if (result.name === "White" || result.name === "Unknown") continue;
 
       rawLabels[cellIndex] = COLOR_IDS.get(result.name);
     }

@@ -4,6 +4,9 @@ import { selectDisplayRegions } from "/src/vision/regionPresentation.js";
 import { findSmoothColorContours, SmoothContourTracker, pickFocusedContour } from "/src/vision/smoothContours.js";
 import { calculateNeutralGains, neutralReferenceFromCenter } from "/src/vision/cameraCalibration.js";
 import { closestReferenceShade } from "/src/vision/referenceColors.js";
+import { describeShade, sanitizeGeminiShade } from "/src/vision/shadeNaming.js";
+import { describeDetailedShade, createShadeIdentityTracker } from "/src/vision/perceptualShade.js";
+import { resolveFindShade, suggestFindShadeNames, findClosestVisibleShade } from "/src/vision/hueFindSearch.js";
 import { averagePixelRegion } from "/src/vision/sampleColor.js";
 import { createFluidReading } from "/src/vision/fluidReading.js";
 import {
@@ -55,6 +58,13 @@ const analysisCanvas = document.createElement("canvas");
 const toggleCamBtn = $("toggleCamBtn");
 const toggleCamLabel = $("toggleCamLabel");
 const colorSelect = $("colorSelect");
+const findShadeBtn = $("findShadeBtn");
+const findSuggestionDialog = $("findSuggestionDialog");
+const findSuggestionTitle = $("findSuggestionTitle");
+const findSuggestionText = $("findSuggestionText");
+const findSuggestionOptions = $("findSuggestionOptions");
+const findSuggestionClose = $("findSuggestionClose");
+const findSuggestionKeep = $("findSuggestionKeep");
 const cameraDeviceSelect = $("cameraDeviceSelect");
 const focusResetBtn = $("focusResetBtn");
 const calibrateBtn = $("calibrateBtn");
@@ -76,6 +86,7 @@ const sampleHex = $("sampleHex");
 const sampleRgb = $("sampleRgb");
 const sampleReticle = $("sampleReticle");
 const pinColorBtn = $("pinColorBtn");
+const refineShadeBtn = $("refineShadeBtn");
 const readingStatus = $("readingStatus");
 const scanSceneBtn = $("scanSceneBtn");
 const colorPreview = $("colorPreview");
@@ -127,18 +138,27 @@ let latestColors = [];
 let targetColor = "";
 let targetRgb = null;
 let targetShade = "";
+let targetStrictShade = false;
+let findNoMatchFrames = 0;
+let findSuggestionShown = false;
 let pointerIsDown = false;
 let pointerIsOverCanvas = false;
 let keyboardSamplingActive = false;
 let currentSample = null;
 let pinnedSample = null;
 let pinnedPosition = null;
+let pinnedReferenceImage = null;
+let geminiShade = null;
+let geminiShadeBusy = false;
+let geminiShadeRequestId = 0;
+let geminiShadeAbort = null;
 let pointerStart = null;
 let lastSampleTime = 0;
 let lastFrameAnalysis = 0;
 let scanSceneRequested = false;
 let hasScannedScene = false;
 const steadyReading = createFluidReading();
+const hueSeeShadeIdentity = createShadeIdentityTracker();
 const SAMPLE_INTERVAL_MS = 32;
 const FRAME_INTERVAL_MS = 180;
 const FIND_INTERVAL_MS = 95;
@@ -201,7 +221,7 @@ function setModePreview(mode) {
 function setActiveMode(mode) {
   const allowed = ["see", "find", "do", "memory"];
   const nextMode = allowed.includes(mode) ? mode : "see";
-  if (currentMode !== nextMode) { hueFindTracker.reset(); focusedContourId = null; pendingFocusPoint = null; }
+  if (currentMode !== nextMode) { hueFindTracker.reset(); focusedContourId = null; pendingFocusPoint = null; hueSeeShadeIdentity.reset(); }
   currentMode = nextMode;
   const pageTitle = document.getElementById("pageTitle");
   const pageHint = document.getElementById("pageHint");
@@ -303,7 +323,9 @@ function getZoneBounds(zoneName) {
 
 const chipColors = {
   red: "#ee7772", orange: "#e9a16b", yellow: "#e8d16d", green: "#81b88d",
-  cyan: "#7ccbc6", blue: "#7e9fdf", purple: "#b59ad9", black: "#68716d"
+  cyan: "#7ccbc6", blue: "#7e9fdf", purple: "#b59ad9", black: "#68716d",
+  gray: "#808080", white: "#ffffff", brown: "#8b4513", pink: "#ffc0cb",
+  teal: "#008080", olive: "#808000", beige: "#f5f5dc"
 };
 
 // In HueSee, show ONLY text labels at stabilized region centers. No outlines.
@@ -315,7 +337,7 @@ function showHueSeeRegionLabels(colors = []) {
   const regions = selectDisplayRegions(colors, { limit: 6, minSamples: 30 });
   setCameraChips(regions.map((region) => ({
     key: region.key,
-    label: region.name,
+    label: region.rgb ? describeDetailedShade(region.rgb).name : region.name,
     color: region.name,
     point: region.center,
     hex: chipColors[String(region.name).toLowerCase()] || region.hex
@@ -545,7 +567,7 @@ function drawTargetOverlay() {
   samplingContext.drawImage(video, 0, 0, width, height);
   const frame = samplingContext.getImageData(0, 0, width, height);
   const found = findSmoothColorContours(frame, {
-    color: targetColor, rgb: targetRgb, minAreaFraction: .015,
+    color: targetColor, rgb: targetRgb, strictShade: targetStrictShade, minAreaFraction: .015,
     relativeMinArea: .28, maxRegions: 6, whiteBalance: neutralGains
   });
   const allRegions = hueFindTracker.update(found, width, height);
@@ -558,10 +580,22 @@ function drawTargetOverlay() {
     : pendingFocusPoint ? [] : allRegions.slice(0, 1);
   if (!regions.length) {
     setCameraChips([]);
+    if (!focusedContourId && !pendingFocusPoint && !findSuggestionShown && currentMode === "find") {
+      findNoMatchFrames++;
+      // The camera needs time to settle. Suggest only after several seconds of
+      // no stable outline, never because a single frame was occluded.
+      if (findNoMatchFrames >= 27) {
+        findSuggestionShown = true;
+        const alternative = findClosestVisibleShade(frame, targetRgb || resolveFindShade(targetShade)?.rgb);
+        showFindSuggestions("not-visible", targetShade || targetColor, alternative ? [alternative] : []);
+      }
+    }
     setFeedback(findResult, focusedContourId ? "Object temporarily lost. Keep it in view or tap another object."
-      : pendingFocusPoint ? "No matching region at that point. Tap the object again." : `Looking for ${targetShade || targetColor}…`);
+      : pendingFocusPoint ? "No matching region at that point. Tap the object again."
+      : `Looking for ${targetShade || targetColor}…${findSuggestionShown ? " Try a suggested alternative if needed." : ""}`);
     return;
   }
+  findNoMatchFrames = 0;
 
   const chips = [];
   for (const region of regions) {
@@ -711,6 +745,8 @@ toggleCamBtn.addEventListener("click", async () => {
     canvas.width = 320;
     canvas.height = Math.max(1, Math.round(320 * video.videoHeight / video.videoWidth));
     steadyReading.reset();
+    hueSeeShadeIdentity.reset();
+    pinnedReferenceImage = null;
     pinnedSample = null;
     lastSampleTime = 0;
     lastFrameAnalysis = 0;
@@ -755,11 +791,14 @@ function stopCamera() {
 
   video.srcObject = null;
   streaming = false;
+  clearGeminiShade();
   latestColors = [];
   currentSample = null;
   pinnedSample = null;
   pinnedPosition = null;
+  pinnedReferenceImage = null;
   steadyReading.reset();
+  hueSeeShadeIdentity.reset();
   lastSamplePosition = null;
   lastSampleTime = 0;
   lastFrameAnalysis = 0;
@@ -784,7 +823,7 @@ function stopCamera() {
   toggleCamBtn.setAttribute("aria-pressed", "false");
   toggleCamBtn.classList.remove("is-active");
   toggleCamLabel.textContent = "Start camera";
-  colorSelect.disabled = true;
+  colorSelect.disabled = false;
   scanSceneBtn.disabled = true;
   sampleFindBtn.disabled = true;
   taskBtn.disabled = Boolean(activeTask?.completed) || Boolean(activeTask?.requiresPhotoCheck);
@@ -822,7 +861,11 @@ function processLoop(time = 0) {
         latestColors = result.colors || [];
         if (scanSceneRequested) {
           hasScannedScene = true;
-          renderDetectedColors(latestColors);
+          // Scene summaries are specific to HueSee; HueFind still receives its original broad group names.
+          renderDetectedColors(currentMode === "see"
+            ? latestColors.map(group => ({ ...group, name: group.regions?.[0]?.rgb
+                ? describeDetailedShade(group.regions[0].rgb).name : group.name }))
+            : latestColors);
           scanSceneBtn.textContent = "Scan scene";
         }
         scanSceneRequested = false;
@@ -917,13 +960,15 @@ function sampleImagePoint(point, source = "pointer", { immediate = false } = {})
     const sample = steadyReading.observe(raw, { immediate, position: point });
 
     if (!sample) return null;
+    const displayShade = hueSeeShadeIdentity.observe(sample.rgb, point, { immediate });
     const nextSample = {
       ...sample,
+      displayShade,
       source,
       position: { x: point.x, y: point.y }
     };
 
-    const changed = !currentSample || currentSample.hex !== nextSample.hex || currentSample.name !== nextSample.name;
+    const changed = !currentSample || currentSample.hex !== nextSample.hex || currentSample.name !== nextSample.name || currentSample.displayShade?.name !== nextSample.displayShade?.name;
     currentSample = nextSample;
     lastSamplePosition = point;
     if (changed) {
@@ -955,7 +1000,7 @@ function moveSampleIndicator(point) {
 }
 
 function renderSample(sample) {
-  sampleName.textContent = sample.name;
+  sampleName.textContent = (sample.displayShade || describeDetailedShade(sample.rgb)).name;
   sampleHex.textContent = sample.hex;
   const { r, g, b } = sample.rgb;
   sampleRgb.textContent = `RGB ${r}, ${g}, ${b}`;
@@ -971,17 +1016,23 @@ function updatePinState() {
   pinColorBtn.textContent = pinned ? "Unpin reading" : "Pin reading";
   pinColorBtn.setAttribute("aria-pressed", String(pinned));
   saveColorBtn.disabled = !streaming || !pinned || pinnedSample?.name === "Unknown";
+  refineShadeBtn.disabled = !streaming || !pinned || geminiShadeBusy;
+  refineShadeBtn.textContent = geminiShadeBusy ? "Checking shade…" : "Refine shade with Gemini";
   setFeedback(readingStatus, pinned
-    ? `Pinned ${pinnedSample.name} (${pinnedSample.hex}). You can save this snapshot to HueMemory.`
+    ? `Pinned ${(pinnedSample.displayShade || describeDetailedShade(pinnedSample.rgb)).name} (${pinnedSample.hex}). Recheck with Gemini under different lighting.`
     : "Hover to explore. Click or tap to pin the color you want to keep.");
 }
 
 function pinReading(point = lastSamplePosition) {
   if (!streaming) return;
+  clearGeminiShade();
   if (pinnedSample) {
     pinnedSample = null;
     pinnedPosition = null;
+    pinnedReferenceImage = null;
+    hueSeeShadeIdentity.reset();
     steadyReading.reset();
+    if (currentSample) renderSample(currentSample);
     sampleIndicator.classList.remove("is-visible");
     sampleReticle.classList.remove("is-visible");
     updatePinState();
@@ -989,10 +1040,15 @@ function pinReading(point = lastSamplePosition) {
   }
   if (point) sampleImagePoint(point, "pin", { immediate: true });
   if (!currentSample) return;
+  // Capture once at PIN TIME, so later Gemini checks can compare light/shadow
+  // without assuming the current pixels are a new surface color.
+  try { pinnedReferenceImage = capturePinnedShadeCrop(point || currentSample.position); }
+  catch { pinnedReferenceImage = null; }
   pinnedSample = {
     name: currentSample.name,
     hex: currentSample.hex,
     rgb: { ...currentSample.rgb },
+    displayShade: currentSample.displayShade || describeDetailedShade(currentSample.rgb),
     position: { ...currentSample.position },
     source: "pin"
   };
@@ -1016,6 +1072,94 @@ function movePinnedIndicator(point) {
   sampleReticle.style.top = `${point.stageY * 100}%`;
   sampleReticle.classList.add("is-visible");
 }
+
+// Gemini is intentionally opt-in and only receives a small, centered still-image crop.
+// Never stream live Camo frames or store an API key in the browser.
+function clearGeminiShade() {
+  geminiShadeRequestId += 1;
+  geminiShadeAbort?.abort();
+  geminiShadeAbort = null;
+  geminiShadeBusy = false;
+  geminiShade = null;
+}
+
+function capturePinnedShadeCrop(point) {
+  if (!streaming || !video.videoWidth || !video.videoHeight || !point) {
+    throw new Error("Start the camera and pin a color first.");
+  }
+  const side = Math.min(video.videoWidth, video.videoHeight) * .27;
+  const sx = clamp(point.x * video.videoWidth - side / 2, 0, video.videoWidth - side);
+  const sy = clamp(point.y * video.videoHeight - side / 2, 0, video.videoHeight - side);
+  const crop = document.createElement("canvas");
+  crop.width = 224;
+  crop.height = 224;
+  crop.getContext("2d").drawImage(video, sx, sy, side, side, 0, 0, 224, 224);
+  return { mimeType: "image/jpeg", data: crop.toDataURL("image/jpeg", .78).split(",")[1] };
+}
+
+function captureCurrentPinnedRgb() {
+  // Sample only a 9×9 center patch of the CURRENT Camo picture. This is used
+  // as lighting context, not to rewrite the initial pinned HEX/RGB value.
+  const image = document.createElement("canvas");
+  image.width = 224; image.height = 224;
+  const point = pinnedPosition || pinnedSample?.position;
+  if (!point || !streaming || !video.videoWidth || !video.videoHeight) return null;
+  image.getContext("2d").drawImage(video, 0, 0, 224, 224);
+  const cx = clamp(Math.floor(point.x * 224), 4, 219);
+  const cy = clamp(Math.floor(point.y * 224), 4, 219);
+  const patch = image.getContext("2d").getImageData(cx - 4, cy - 4, 9, 9);
+  return averagePixelRegion(patch);
+}
+
+refineShadeBtn.addEventListener("click", async () => {
+  if (!pinnedSample || geminiShadeBusy || currentMode !== "see") return;
+  const reading = pinnedSample;
+  const requestId = ++geminiShadeRequestId;
+  geminiShadeBusy = true;
+  geminiShadeAbort = new AbortController();
+  let finalFeedback = "";
+  updatePinState();
+  setFeedback(readingStatus, "Gemini is comparing your pinned shade with the current Camo lighting… Two small photo crops may be sent to Google.");
+  try {
+    const image = capturePinnedShadeCrop(pinnedPosition || reading.position);
+    const currentRgb = captureCurrentPinnedRgb();
+    const response = await fetch("/api/shades", {
+      method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image, rgb: reading.rgb, referenceImage: pinnedReferenceImage,
+        currentRgb, previousShadeName: geminiShade?.name || "" }),
+      signal: geminiShadeAbort.signal
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || `Gemini unavailable (${response.status}).`);
+    const suggestion = sanitizeGeminiShade({ shadeName: result.name, note: result.note });
+    if (!suggestion) throw new Error("Gemini did not return a usable shade name.");
+    if (requestId !== geminiShadeRequestId || pinnedSample !== reading) return;
+    if (result.sameSurface !== "no") {
+      geminiShade = { ...suggestion, hex: reading.hex, confidence: result.confidence,
+        sameSurface: result.sameSurface, lightingChanged: result.lightingChanged,
+        identityHeld: result.identityHeld, needsConfirmation: result.needsConfirmation };
+    }
+    renderSample(reading);
+    finalFeedback = result.sameSurface === "no"
+      ? `Gemini sees a different surface; the original pinned shade remains ${(reading.displayShade || describeDetailedShade(reading.rgb)).name}. Re-pin the intended object if it moved.`
+      : `Gemini suggests ${suggestion.name} (${result.confidence || "low"} confidence). ${result.identityHeld ? "Shade identity retained across lighting. " : ""}${result.sameSurface === "uncertain" ? "Object identity uncertain; original pinned label is retained if previously verified. " : ""}${suggestion.note}`;
+  } catch (error) {
+    if (requestId === geminiShadeRequestId && pinnedSample === reading) {
+      finalFeedback = error.name === "AbortError"
+        ? "Gemini shade check cancelled; local shade detection still works."
+        : `${error.message} Local shade detection still works.`;
+    }
+  } finally {
+    if (requestId === geminiShadeRequestId) {
+      geminiShadeBusy = false;
+      geminiShadeAbort = null;
+      updatePinState();
+      // updatePinState restores the controls; preserve useful error/success feedback.
+      if (finalFeedback) setFeedback(readingStatus, finalFeedback);
+    }
+  }
+});
 
 pinColorBtn.addEventListener("click", () => pinReading());
 scanSceneBtn.addEventListener("click", () => {
@@ -1054,10 +1198,11 @@ function rgbToHsl(r, g, b) {
 }
 
 function getPlainLanguageDescription(sample, hsl) {
-  if (sample.name === "Unknown") return "Outside supported categories";
-  if (sample.name === "Black") return "Very dark neutral";
-  if (sample.name === "White") return "Very light neutral";
-  if (sample.name === "Gray") return "Low-saturation neutral";
+  const shade = sample.displayShade || describeDetailedShade(sample.rgb);
+  if (shade.name === "Unknown") return "Outside supported categories";
+  if (shade.family === "Black") return "Very dark neutral";
+  if (shade.family === "White") return "Very light neutral";
+  if (shade.family === "Gray") return "Low-saturation neutral";
 
   const lightness = hsl.l < 20 ? "Very dark" :
     hsl.l < 40 ? "Dark" :
@@ -1066,7 +1211,7 @@ function getPlainLanguageDescription(sample, hsl) {
   const saturation = hsl.s < 20 ? "muted" :
     hsl.s < 45 ? "soft" :
     hsl.s < 70 ? "moderate" : "vivid";
-  return `${lightness}, ${saturation} ${sample.name.toLowerCase()}`;
+  return `${lightness}, ${saturation} ${shade.name.toLowerCase()}`;
 }
 
 function renderColorDetails(sample) {
@@ -1074,10 +1219,13 @@ function renderColorDetails(sample) {
   const hsl = rgbToHsl(r, g, b);
 
   colorPreview.style.backgroundColor = sample.hex;
-  colorNameDisplay.textContent = sample.name;
+  const shade = sample.displayShade || describeDetailedShade(sample.rgb);
+  colorNameDisplay.textContent = shade.name;
   const nearest = closestReferenceShade(sample.rgb);
-  colorDescription.textContent = getPlainLanguageDescription(sample, hsl) +
-    (nearest ? ` · closest CSS shade: ${nearest}` : "");
+  colorDescription.textContent = "Camera estimate: " + getPlainLanguageDescription(sample, hsl) +
+    (nearest ? ` · closest CSS shade: ${nearest}` : "") +
+    (shade.lightingHeld ? " · Shade identity retained through a lighting change; HEX/RGB are measured values" : "") +
+    (geminiShade?.hex === sample.hex ? ` · Gemini suggests: ${geminiShade.name} (${geminiShade.confidence || "low"} confidence)${geminiShade.note ? ` · ${geminiShade.note}` : ""}${geminiShade.needsConfirmation ? " · Verify under neutral lighting" : ""}` : "");
   colorHex.textContent = sample.hex;
   colorRgb.textContent = `(${r}, ${g}, ${b})`;
   colorHsl.textContent = `(${hsl.h}°, ${hsl.s}%, ${hsl.l}%)`;
@@ -1102,7 +1250,9 @@ function resetColorDetails() {
 function getSpokenColorDetails(sample) {
   const { r, g, b } = sample.rgb;
   const hsl = rgbToHsl(r, g, b);
-  return `${sample.name}. Hex ${sample.hex}. RGB ${r}, ${g}, ${b}. HSL ${hsl.h} degrees, ${hsl.s} percent saturation, ${hsl.l} percent lightness.`;
+  const shadeName = (sample.displayShade || describeDetailedShade(sample.rgb)).name;
+  const suggestion = geminiShade?.hex === sample.hex ? ` Gemini suggests ${geminiShade.name}.` : "";
+  return `${shadeName}.${suggestion} Hex ${sample.hex}. RGB ${r}, ${g}, ${b}. HSL ${hsl.h} degrees, ${hsl.s} percent saturation, ${hsl.l} percent lightness.`;
 }
 
 function getApproximateRegion(color) {
@@ -1352,25 +1502,100 @@ colorChipToggle.addEventListener("click", () => {
   else if (!showColorChips) setCameraChips([]);
 });
 
+function closeFindSuggestions() {
+  if (findSuggestionDialog?.open) findSuggestionDialog.close();
+}
+
+function showFindSuggestions(reason, requested, choices = []) {
+  if (!findSuggestionDialog) return;
+  findSuggestionOptions.replaceChildren();
+  const unknown = reason === "unknown";
+  findSuggestionTitle.textContent = unknown ? "Shade name not recognized" : "That shade isn't visible yet";
+  findSuggestionText.textContent = unknown
+    ? `We couldn't match “${requested}” to a known shade name. Choose a similar catalog name, or try a HEX value.`
+    : choices.length
+      ? `No stable outline for “${requested}” was found. Here's the closest substantial color area detected in the live camera. It's only an approximate match.`
+      : `No substantial “${requested}” region was found. Move the camera, improve lighting, or try another color name.`;
+  for (const choice of choices) {
+    const option = document.createElement("button");
+    option.type = "button";
+    option.className = "hue-find-suggestion-option";
+    const swatch = document.createElement("span");
+    swatch.className = "hue-find-suggestion-swatch";
+    swatch.style.backgroundColor = choice.hex;
+    swatch.setAttribute("aria-hidden", "true");
+    const copy = document.createElement("span");
+    const title = document.createElement("strong");
+    title.textContent = choice.name;
+    const details = document.createElement("small");
+    details.textContent = unknown ? `Catalog shade · ${choice.hex}`
+      : `Closest camera color · ${choice.hex}${choice.distance > 25 ? " · weak similarity" : ""}`;
+    copy.append(title, details);
+    option.append(swatch, copy);
+    option.addEventListener("click", () => {
+      closeFindSuggestions();
+      setFindTarget(choice.name, true, unknown ? null : { rgb: choice.rgb, shade: choice.name });
+    });
+    findSuggestionOptions.append(option);
+  }
+  if (!choices.length && unknown) {
+    const help = document.createElement("p");
+    help.textContent = "Try a simpler shade name like olive green, a specific HEX (#9CAF88), or RGB (156, 175, 136).";
+    findSuggestionOptions.append(help);
+  }
+  if (!findSuggestionDialog.open) findSuggestionDialog.showModal();
+}
+findSuggestionClose?.addEventListener("click", closeFindSuggestions);
+findSuggestionKeep?.addEventListener("click", closeFindSuggestions);
+findSuggestionDialog?.addEventListener("click", event => {
+  if (event.target === findSuggestionDialog) closeFindSuggestions();
+});
+
 function setFindTarget(value, shouldSpeak = true, colorReference = null) {
-  const normalized = normalizeColorCategory(value);
-  targetColor = normalized;
-  targetRgb = colorReference?.rgb || null;
-  targetShade = colorReference?.shade || "";
-  colorSelect.value = normalized;
+  const text = String(value || "").trim();
+  let shade = resolveFindShade(text);
+  if (colorReference?.rgb && [colorReference.rgb.r, colorReference.rgb.g, colorReference.rgb.b].every(Number.isFinite)) {
+    // Saving, sampling, or choosing a camera alternative uses a real RGB
+    // reference rather than mapping the displayed shade back to a broad hue.
+    const sampled = colorReference.rgb;
+    const detail = describeDetailedShade(sampled);
+    shade = { ok: true, name: colorReference.shade || detail.name, rgb: sampled,
+      family: detail.family, broad: false };
+  }
+  if (text && !shade.ok) {
+    targetColor = "";
+    targetRgb = null;
+    targetShade = "";
+    targetStrictShade = false;
+    clearVectorOutline();
+    setCameraChips([]);
+    hueFindTracker.reset();
+    findSuggestionShown = true;
+    findNoMatchFrames = 0;
+    colorSelect.value = text;
+    showFindSuggestions("unknown", text, shade.suggestions || suggestFindShadeNames(text));
+    setFeedback(findResult, `“${text}” isn't in the shade catalog. Select a suggestion or enter a HEX value.`);
+    return;
+  }
+  targetColor = shade.ok ? shade.family.toLowerCase() : "";
+  targetRgb = shade.ok && !shade.broad ? shade.rgb : null;
+  targetStrictShade = Boolean(shade.ok && !shade.broad);
+  targetShade = shade.ok ? shade.name : "";
+  colorSelect.value = shade.ok ? (colorReference?.shade || shade.name) : "";
+  findNoMatchFrames = 0;
+  findSuggestionShown = false;
   hueFindTracker.reset();
   focusedContourId = null;
   pendingFocusPoint = null;
-  if (!normalized) {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    clearVectorOutline();
-    setCameraChips([]);
+  clearVectorOutline();
+  setCameraChips([]);
+  if (!targetColor) {
     targetRgb = null;
     targetShade = "";
-    setFeedback(findResult, "Choose a target to begin.");
+    setFeedback(findResult, "Type a color or shade name to begin.");
     return;
   }
-  const label = targetShade || normalized;
+  const label = targetShade || targetColor;
   setFeedback(findResult, streaming ? `Looking for ${label}…` : `Target set: ${label}. Start the camera to find it.`);
   if (shouldSpeak) speak(`Finding ${label}`);
 }
@@ -1387,9 +1612,9 @@ function focusHueFindAt(point) {
     const x = clamp(Math.round(point.x * width) - 4, 0, Math.max(0, width - 9));
     const y = clamp(Math.round(point.y * height) - 4, 0, Math.max(0, height - 9));
     const rgb = averagePixelRegion(samplingContext.getImageData(x, y, 9, 9));
-    const sample = classifyColor(rgb.r, rgb.g, rgb.b);
-    if (!normalizeColorCategory(sample.name)) {
-      setFeedback(findResult, "Choose a color first, or tap a colorful object."); return;
+    const sample = describeDetailedShade(rgb);
+    if (sample.family === "Unknown") {
+      setFeedback(findResult, "Choose a color first, or tap an object."); return;
     }
     setFindTarget(sample.name, false, { rgb, shade: sample.name });
   }
@@ -1428,7 +1653,10 @@ calibrateBtn?.addEventListener("click", () => {
   hueFindTracker.reset(); focusedContourId = null; pendingFocusPoint = null;
 });
 
-colorSelect.addEventListener("change", (event) => setFindTarget(event.target.value));
+findShadeBtn?.addEventListener("click", () => setFindTarget(colorSelect.value));
+colorSelect.addEventListener("keydown", event => {
+  if (event.key === "Enter") { event.preventDefault(); setFindTarget(colorSelect.value); }
+});
 sampleFindBtn.addEventListener("click", () => {
   if (currentSample) setFindTarget(currentSample.name, true, { ...currentSample, shade: currentSample.name });
 });
@@ -1436,11 +1664,15 @@ clearFindBtn.addEventListener("click", () => {
   targetColor = "";
   targetRgb = null;
   targetShade = "";
+  targetStrictShade = false;
+  findNoMatchFrames = 0;
+  findSuggestionShown = false;
+  closeFindSuggestions();
   colorSelect.value = "";
   clearVectorOutline();
   focusedContourId = null; pendingFocusPoint = null;
   hueFindTracker.reset();
-  setFeedback(findResult, "Choose a target to begin.");
+  setFeedback(findResult, "Type a color or shade name to begin.");
 });
 
 // HueDo interprets open-ended instructions and turns supported details into camera cues.
@@ -1645,7 +1877,7 @@ function setActiveTask(task) {
   targetRgb = null;
   targetShade = "";
   colorSelect.value = targetColor;
-  colorSelect.disabled = !streaming;
+  colorSelect.disabled = false;
   taskBtn.disabled = Boolean(task.completed) || Boolean(activeTask.requiresPhotoCheck && !streaming);
   taskBtn.textContent = task.completed ? "Completed" : activeTask.requiresPhotoCheck ? "Check with camera" : "Mark complete";
   setFeedback(taskResult, task.completed

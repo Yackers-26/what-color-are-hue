@@ -3,6 +3,9 @@ import { matchesSavedShade } from "./colorPerception.js";
 // The mask is cleaned before tracing so isolated camera pixels do not become outlines.
 import { classifyColor } from "./colorDetector.js";
 import { applyNeutralGains } from "./cameraCalibration.js";
+import { rgbToLab, rgbHue } from "./colorPerception.js";
+import { deltaE2000, plausibleLightingChange } from "./perceptualShade.js";
+import { describeShade } from "./shadeNaming.js";
 
 const STEP = 3;
 const clamp = (value, minimum, maximum) => Math.max(minimum, Math.min(maximum, value));
@@ -17,9 +20,22 @@ function hueOf(r, g, b) {
   return { hue, saturation: delta / max, value: max };
 }
 
-export function matchesTargetColor(r, g, b, color, rgb = null) {
-  if (!color) return false;
-  const name = color.toLowerCase();
+// Exact-shade mode does not fall back to the entire red/green/etc. family.
+// CIEDE2000 limits shade drift; a modest extra tolerance handles shadows.
+export function matchesSpecificShade(sample, reference) {
+  if (!sample || !reference) return false;
+  const a = rgbHue(sample), b = rgbHue(reference);
+  if ((a.saturation < .16) !== (b.saturation < .16)) return false;
+  const difference = deltaE2000(rgbToLab(sample), rgbToLab(reference));
+  if (difference <= 13) return true;
+  const lightnessGap = Math.abs(rgbToLab(sample).L - rgbToLab(reference).L);
+  return difference <= 22 && lightnessGap <= 27 && plausibleLightingChange(reference, sample);
+}
+
+export function matchesTargetColor(r, g, b, color, rgb = null, { strictShade = false } = {}) {
+  if (!color && !rgb) return false;
+  if (strictShade && rgb) return matchesSpecificShade({r, g, b}, rgb);
+  const name = String(color || "").toLowerCase();
   if (rgb) {
     // Compare perceptual hue/chroma so a brightness change doesn't reject a saved shade.
     if (!matchesSavedShade({ r, g, b }, rgb)) return false;
@@ -29,6 +45,8 @@ export function matchesTargetColor(r, g, b, color, rgb = null) {
         classifyColor(rgb.r, rgb.g, rgb.b).name.toLowerCase() === name) return true;
   }
   const basic = classifyColor(r, g, b).name.toLowerCase();
+  if (["brown", "pink", "teal", "olive", "beige"].includes(name))
+    return describeShade({r, g, b}).family.toLowerCase() === name;
   if (name === "black") return basic === "black";
   if (name === "white" || name === "gray") return basic === name;
   const { hue, saturation, value } = hueOf(r, g, b);
@@ -44,7 +62,7 @@ export function matchesTargetColor(r, g, b, color, rgb = null) {
   return name === "red" ? hue >= 342 || hue <= to : hue >= from && hue <= to;
 }
 
-function sampleMask(imageData, color, rgb, step, whiteBalance = null) {
+function sampleMask(imageData, color, rgb, step, whiteBalance = null, strictShade = false) {
   const { data, width, height } = imageData;
   const columns = Math.ceil(width / step), rows = Math.ceil(height / step);
   const mask = new Uint8Array(columns * rows);
@@ -62,8 +80,8 @@ function sampleMask(imageData, color, rgb, step, whiteBalance = null) {
         const corrected = applyNeutralGains({r: red / count, g: green / count, b: blue / count}, whiteBalance);
         // Stored reference shades were captured through the camera. Check both
         // original and calibrated samples so calibration does not break old saves.
-        if (matchesTargetColor(corrected.r, corrected.g, corrected.b, color, rgb) ||
-            (rgb && whiteBalance && matchesTargetColor(red / count, green / count, blue / count, color, rgb))) {
+        if (matchesTargetColor(corrected.r, corrected.g, corrected.b, color, rgb, { strictShade }) ||
+            (rgb && whiteBalance && matchesTargetColor(red / count, green / count, blue / count, color, rgb, { strictShade }))) {
           mask[y * columns + x] = 1;
         }
       }
@@ -208,10 +226,10 @@ function boundsOf(points) {
 
 export function findSmoothColorContours(imageData, {
   color, rgb = null, minAreaFraction = .011, relativeMinArea = .24, maxRegions = 3,
-  step = STEP, whiteBalance = null
+  step = STEP, whiteBalance = null, strictShade = false
 } = {}) {
   if (!imageData?.data || !imageData.width || !imageData.height || !color) return [];
-  const { mask, columns, rows } = sampleMask(imageData, color, rgb, step, whiteBalance);
+  const { mask, columns, rows } = sampleMask(imageData, color, rgb, step, whiteBalance, strictShade);
   const cleaned = cleanColorMask(mask, columns, rows);
   const minimum = Math.max(25, Math.round(columns * rows * minAreaFraction));
   const components = componentCells(cleaned, columns, rows);

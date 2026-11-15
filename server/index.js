@@ -8,6 +8,7 @@ import { mountAuth, prepareAuthCollections, requireAuth, requireSameOrigin, reso
 import colorsRouter from "./routes/colors.js";
 import tasksRouter from "./routes/tasks.js";
 import interpretRouter from "./routes/interpret.js";
+import shadesRouter from "./routes/shades.js";
 
 const rootDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const publicDir = path.join(rootDir, "public");
@@ -68,6 +69,7 @@ function requireAuthOrLocalDemo(req, res, next) {
   return res.status(401).json({ error: "Sign in to use Gemini outside the local demo." });
 }
 app.use("/api/interpret", requireAuthOrLocalDemo, interpretRouter);
+app.use("/api/shades", requireAuthOrLocalDemo, shadesRouter);
 app.use((req, res, next) => req.user || req.demo ? next() : requireAuth(req, res, next));
 app.use(express.static(publicDir, { index: false }));
 app.use("/src", express.static(path.join(rootDir, "src")));

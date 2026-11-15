@@ -93,6 +93,7 @@
 <div class="panel-actions huesee-actions">
 <button class="button button-secondary" disabled="" id="speakDetailsBtn" type="button">Speak color</button>
 <button aria-pressed="false" class="button button-primary" disabled="" id="pinColorBtn" type="button">Pin reading</button>
+<button class="button button-quiet" disabled="" id="refineShadeBtn" type="button" title="Send a cropped photo of your pinned spot to Google Gemini for an optional shade estimate">Refine shade with Gemini</button>
 <button class="button button-quiet" disabled="" id="saveColorBtn" type="button">Save pinned color to HueMemory</button>
 </div>
 <p aria-live="polite" class="reading-status" id="readingStatus" role="status">Start the camera to identify colors.</p>
@@ -111,14 +112,13 @@
 </div>
 <div class="find-controls">
 <div class="field-group">
-<label for="colorSelect">Target color</label>
-<select disabled="" id="colorSelect">
-<option value="">Choose a color</option>
-<option value="Red">Red</option><option value="Orange">Orange</option>
-<option value="Yellow">Yellow</option><option value="Green">Green</option>
-<option value="Cyan">Cyan</option><option value="Blue">Blue</option>
-<option value="Purple">Purple</option><option value="Black">Black</option>
-</select>
+<label for="colorSelect">Search for any color or shade</label>
+<div class="hue-find-search-row">
+<input id="colorSelect" type="text" autocomplete="off" spellcheck="false" enterkeyhint="search"
+  placeholder="e.g. sage green, burgundy, #7FFF00" maxlength="100" aria-describedby="findSearchHint" />
+<button class="button button-primary" id="findShadeBtn" type="button">Find</button>
+</div>
+<p id="findSearchHint" class="find-focus-instruction">Type a color name, shade, HEX, or RGB value, then press Enter or Find.</p>
 </div>
 <button class="button button-secondary full-button" disabled="" id="sampleFindBtn" type="button">Find sampled color</button>
 <p class="find-focus-instruction">Tap a matching object in the camera to follow just that region.</p>
@@ -194,4 +194,14 @@
 </section>
 </aside>
 </div>
-</div></main><div id="audioAnnouncement" class="sr-only" aria-live="assertive" aria-atomic="true"></div><script type="module" src="/script.js"></script></body></html>
+</div></main><div id="audioAnnouncement" class="sr-only" aria-live="assertive" aria-atomic="true"></div><script type="module" src="/script.js"></script><dialog id="findSuggestionDialog" class="hue-find-suggestion-dialog" aria-labelledby="findSuggestionTitle" aria-describedby="findSuggestionText">
+<div class="hue-find-dialog-head">
+<p class="panel-kicker">HUEFIND · CLOSEST MATCH</p>
+<button id="findSuggestionClose" type="button" class="hue-find-dialog-close" aria-label="Close suggestions">×</button>
+</div>
+<h2 id="findSuggestionTitle">Couldn't find that shade</h2>
+<p id="findSuggestionText">Here are the closest options.</p>
+<div id="findSuggestionOptions" class="hue-find-suggestion-options"></div>
+<button type="button" id="findSuggestionKeep" class="button button-secondary full-button">Keep searching</button>
+</dialog>
+</body></html>
