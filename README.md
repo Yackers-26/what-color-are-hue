@@ -1,3 +1,7 @@
+## Try it out
+
+**[https://whatcolorarehue.us](https://whatcolorarehue.us)**
+
 ## Inspiration
 
 Color-dependent tasks are everywhere, but they assume everyone can distinguish colors equally well. For people with color-vision deficiencies, simple activities like finding a blue pen or following sorting instructions can become unnecessary barriers. We wanted to go beyond identifying colors and help people independently understand, locate, and act on color-dependent information.
