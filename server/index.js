@@ -97,4 +97,12 @@ try {
   console.error("MongoDB connection failed. The login page remains available:", error.message);
 }
 
-app.listen(PORT, () => console.log(`WhatColorAreHue? running at http://localhost:${PORT}`));
+
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`WhatColorAreHue? running at http://localhost:${PORT}`);
+  });
+}
+
+export default app;
+
