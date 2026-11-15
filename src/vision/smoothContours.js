@@ -7,7 +7,7 @@ import { rgbToLab, rgbHue } from "./colorPerception.js";
 import { deltaE2000, plausibleLightingChange } from "./perceptualShade.js";
 import { describeShade } from "./shadeNaming.js";
 
-const STEP = 3;
+const STEP = 2;
 const clamp = (value, minimum, maximum) => Math.max(minimum, Math.min(maximum, value));
 
 function hueOf(r, g, b) {
@@ -22,52 +22,67 @@ function hueOf(r, g, b) {
 
 // Exact-shade mode does not fall back to the entire red/green/etc. family.
 // CIEDE2000 limits shade drift; a modest extra tolerance handles shadows.
+// Named shades must remain distinct from nearby hues and low-chroma surfaces.
+// A tightly bounded change in brightness can be accepted as lighting, but a
+// neighboring orange/yellow or skin-colored area must not become a red match.
 export function matchesSpecificShade(sample, reference) {
   if (!sample || !reference) return false;
   const a = rgbHue(sample), b = rgbHue(reference);
-  if ((a.saturation < .16) !== (b.saturation < .16)) return false;
-  const difference = deltaE2000(rgbToLab(sample), rgbToLab(reference));
-  if (difference <= 13) return true;
-  const lightnessGap = Math.abs(rgbToLab(sample).L - rgbToLab(reference).L);
-  return difference <= 22 && lightnessGap <= 27 && plausibleLightingChange(reference, sample);
+  const neutralA = a.saturation < .16, neutralB = b.saturation < .16;
+  if (neutralA !== neutralB) return false;
+  const hueGap = Math.abs(a.hue - b.hue);
+  if (!neutralA && Math.min(hueGap, 360 - hueGap) > 12) return false;
+  if (Math.abs(a.saturation - b.saturation) > (neutralA ? .11 : .19)) return false;
+  const sampleLab = rgbToLab(sample), referenceLab = rgbToLab(reference);
+  const difference = deltaE2000(sampleLab, referenceLab);
+  if (difference <= 10) return true;
+  const lightnessGap = Math.abs(sampleLab.L - referenceLab.L);
+  return difference <= 17 && lightnessGap <= 23 && plausibleLightingChange(reference, sample);
 }
 
 export function matchesTargetColor(r, g, b, color, rgb = null, { strictShade = false } = {}) {
   if (!color && !rgb) return false;
-  if (strictShade && rgb) return matchesSpecificShade({r, g, b}, rgb);
+  if (strictShade && rgb) return matchesSpecificShade({ r, g, b }, rgb);
   const name = String(color || "").toLowerCase();
+  const sample = { r, g, b };
   if (rgb) {
-    // Compare perceptual hue/chroma so a brightness change doesn't reject a saved shade.
-    if (!matchesSavedShade({ r, g, b }, rgb)) return false;
-    // A saved red shade can still be red after a lighting shift crosses
-    // a rigid red/orange cutoff. The saved color's chroma provides the guard.
-    if (!["black", "white", "gray"].includes(name) &&
-        classifyColor(rgb.r, rgb.g, rgb.b).name.toLowerCase() === name) return true;
+    const lightnessDifference = Math.abs(rgbToLab(sample).L - rgbToLab(rgb).L);
+    return lightnessDifference <= 24 && matchesSavedShade(sample, rgb, {
+      maxHueDifference: 20, maxChromaDifference: 27
+    });
   }
-  const basic = classifyColor(r, g, b).name.toLowerCase();
-  if (["brown", "pink", "teal", "olive", "beige"].includes(name))
-    return describeShade({r, g, b}).family.toLowerCase() === name;
-  if (name === "black") return basic === "black";
-  if (name === "white" || name === "gray") return basic === name;
   const { hue, saturation, value } = hueOf(r, g, b);
-  // Skin and warm shadows can look red at very low chroma. Require a
-  // substantially red hue/saturation instead of matching every pink/orange patch.
-  if (saturation < (name === "red" ? 0.52 : 0.22) || value < 45) return false;
-  const bands = {
-    red: [0, 14], orange: [15, 52], yellow: [43, 82], green: [72, 175],
-    cyan: [168, 206], blue: [198, 268], purple: [261, 345]
-  };
-  if (!bands[name]) return basic === name;
-  const [from, to] = bands[name];
-  return name === "red" ? hue >= 342 || hue <= to : hue >= from && hue <= to;
+  const family = describeShade(sample).family.toLowerCase();
+  if (value < 28 && name !== "black") return false;
+  // Keep the broad families non-overlapping and rely on luminance/chroma
+  // to separate brown from orange, olive from yellow, and skin from red.
+  if (["black", "white", "gray", "brown", "pink", "teal", "olive", "beige"].includes(name)) {
+    return family === name;
+  }
+  if (saturation < (name === "red" ? .64 : .30)) return false;
+  if (name === "red") return family === "red" && (hue <= 11 || hue >= 349);
+  if (name === "orange") return family === "orange" && hue >= 11 && hue < 45;
+  if (name === "yellow") return family === "yellow" && hue >= 43 && hue < 70;
+  if (name === "green") return family === "green" && hue >= 68 && hue < 170;
+  if (name === "cyan") return family === "cyan" && hue >= 170 && hue < 198;
+  if (name === "blue") return family === "blue" && hue >= 198 && hue < 260;
+  if (name === "purple") return family === "purple" && (hue >= 260 && hue < 341);
+  return family === name;
 }
 
-function sampleMask(imageData, color, rgb, step, whiteBalance = null, strictShade = false) {
+function sampleMask(imageData, color, rgb, step, whiteBalance = null, strictShade = false, roiBounds = null, pixelMatcher = null) {
   const { data, width, height } = imageData;
   const columns = Math.ceil(width / step), rows = Math.ceil(height / step);
   const mask = new Uint8Array(columns * rows);
+  const sampleRgb = new Uint8Array(columns * rows * 3);
   for (let y = 0; y < rows; y++) {
     for (let x = 0; x < columns; x++) {
+      if (roiBounds) {
+        const centerX = Math.min(width - 1, (x + .5) * step);
+        const centerY = Math.min(height - 1, (y + .5) * step);
+        if (centerX < roiBounds.x || centerX > roiBounds.x + roiBounds.width ||
+            centerY < roiBounds.y || centerY > roiBounds.y + roiBounds.height) continue;
+      }
       let red = 0, green = 0, blue = 0, count = 0;
       for (let py = y * step; py < Math.min(height, (y + 1) * step); py++) {
         for (let px = x * step; px < Math.min(width, (x + 1) * step); px++) {
@@ -80,14 +95,20 @@ function sampleMask(imageData, color, rgb, step, whiteBalance = null, strictShad
         const corrected = applyNeutralGains({r: red / count, g: green / count, b: blue / count}, whiteBalance);
         // Stored reference shades were captured through the camera. Check both
         // original and calibrated samples so calibration does not break old saves.
-        if (matchesTargetColor(corrected.r, corrected.g, corrected.b, color, rgb, { strictShade }) ||
-            (rgb && whiteBalance && matchesTargetColor(red / count, green / count, blue / count, color, rgb, { strictShade }))) {
-          mask[y * columns + x] = 1;
+        const raw = { r: red / count, g: green / count, b: blue / count };
+        const match = pixelMatcher
+          ? (pixelMatcher(corrected, color) || (whiteBalance && pixelMatcher(raw, color)))
+          : matchesTargetColor(corrected.r, corrected.g, corrected.b, color, rgb, { strictShade }) ||
+            (rgb && whiteBalance && matchesTargetColor(raw.r, raw.g, raw.b, color, rgb, { strictShade }));
+        if (match) {
+          const cell = y * columns + x;
+          mask[cell] = 1;
+          sampleRgb.set([Math.round(raw.r), Math.round(raw.g), Math.round(raw.b)], cell * 3);
         }
       }
     }
   }
-  return { mask, columns, rows };
+  return { mask, sampleRgb, columns, rows };
 }
 
 function morph(mask, columns, rows, radius, method) {
@@ -112,7 +133,7 @@ function morph(mask, columns, rows, radius, method) {
   return out;
 }
 
-export function cleanColorMask(mask, columns, rows, { closeRadius = 3 } = {}) {
+export function cleanColorMask(mask, columns, rows, { closeRadius = 1 } = {}) {
   if (!mask?.length || columns < 1 || rows < 1) return new Uint8Array();
   // Closing joins small gaps, then opening drops tiny specks.
   const closed = morph(morph(mask, columns, rows, closeRadius, "dilate"), columns, rows, closeRadius, "erode");
@@ -226,10 +247,10 @@ function boundsOf(points) {
 
 export function findSmoothColorContours(imageData, {
   color, rgb = null, minAreaFraction = .011, relativeMinArea = .24, maxRegions = 3,
-  step = STEP, whiteBalance = null, strictShade = false
+  step = STEP, whiteBalance = null, strictShade = false, roiBounds = null, pixelMatcher = null
 } = {}) {
   if (!imageData?.data || !imageData.width || !imageData.height || !color) return [];
-  const { mask, columns, rows } = sampleMask(imageData, color, rgb, step, whiteBalance, strictShade);
+  const { mask, sampleRgb, columns, rows } = sampleMask(imageData, color, rgb, step, whiteBalance, strictShade, roiBounds, pixelMatcher);
   const cleaned = cleanColorMask(mask, columns, rows);
   const minimum = Math.max(25, Math.round(columns * rows * minAreaFraction));
   const components = componentCells(cleaned, columns, rows);
@@ -238,6 +259,10 @@ export function findSmoothColorContours(imageData, {
   const results = [];
   for (const cells of components) {
     if (cells.length < minimum || cells.length < largest * relativeMinArea || results.length >= maxRegions) continue;
+    // Don't let mask closing convert a few matching pixels into a large false
+    // region. The majority of its cells must STILL match the requested color.
+    const purity = cells.reduce((sum, index) => sum + (mask[index] ? 1 : 0), 0) / cells.length;
+    if (purity < .79) continue;
     const raw = traceBoundary(cells, columns, rows);
     if (raw.length < 4) continue;
     let polygon = raw.map(([x, y]) => [Math.min(x * step, imageData.width), Math.min(y * step, imageData.height)]);
@@ -245,8 +270,14 @@ export function findSmoothColorContours(imageData, {
     const points = resampleClosed(polygon);
     if (!points.length) continue;
     const bounds = boundsOf(points);
+    // Representative RGB uses ONLY the pixels accepted by this contour's mask.
+    // HueDo can describe a muted real-world shade without sampling the background.
+    const samples = cells.filter(index => mask[index]);
+    const mean = channel => samples.reduce((sum, index) => sum + sampleRgb[index * 3 + channel], 0) / Math.max(1, samples.length);
+    const representativeRgb = { r: Math.round(mean(0)), g: Math.round(mean(1)), b: Math.round(mean(2)) };
     results.push({
       samples: cells.length,
+      rgb: representativeRgb,
       bounds,
       center: { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 },
       points

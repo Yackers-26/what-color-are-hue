@@ -1,9 +1,12 @@
 import { Router } from "express";
 import { GoogleGenAI, Type } from "@google/genai";
-import { parseInstruction, describeTarget, describeTask, isSortTask } from "../../public/js/hueDoParser.js";
+import { parseInstruction, describeTarget, taskTypeOf, isMultiObjectTask, normalizeInstructionText } from "../../public/js/hueDoParser.js";
+import { DEFAULT_GEMINI_MODEL, geminiModelCandidates } from "../geminiModelPolicy.js";
+import { normalizeHueDoVerification } from "../../src/vision/hueDoVerification.js";
+import { requestedHueDoColor } from "../../src/vision/hueDoLanguage.js";
 
 const router = Router();
-const MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+const MODEL = String(process.env.GEMINI_MODEL || "").trim() || DEFAULT_GEMINI_MODEL;
 
 // Free Gemini keys have a small per-minute limit for each model (error 429), and models can be busy (503).
 // Strategy: never wait long. If a model is limited, rest it for a minute and go straight to the next model.
@@ -16,34 +19,12 @@ let fallbackModels = null;
 let lastGoodModel = null;
 
 async function getFallbackModels() {
-  if (fallbackModels) return fallbackModels;
-  const fromEnv = String(process.env.GEMINI_FALLBACK_MODELS || "").split(",").map((name) => name.trim()).filter(Boolean);
-  if (fromEnv.length) {
-    fallbackModels = fromEnv;
-  } else {
-    // Ask Google which models this key can use, and keep the general "flash" ones.
-    const names = [];
-    try {
-      const pager = await ai.models.list({ config: { pageSize: 100 } });
-      for await (const model of pager) {
-        const name = String(model.name || "").replace(/^models\//, "");
-        const actions = model.supportedActions || [];
-        if (!/flash/i.test(name) || /(image|tts|audio|live|embed|vision-only)/i.test(name)) continue;
-        if (actions.length && !actions.includes("generateContent")) continue;
-        names.push(name);
-      }
-    } catch (error) {
-      console.warn("Could not list Gemini models:", error.message);
-    }
-    // Newest first, and "lite" models (fastest) ahead of the others.
-    fallbackModels = names
-      .filter((name) => name !== MODEL)
-      .sort()
-      .reverse()
-      .sort((first, second) => Number(/lite/.test(second)) - Number(/lite/.test(first)))
-      .slice(0, 6);
+  if (!fallbackModels) {
+    // Build a safe list immediately. Do not depend on models.list() succeeding:
+    // it sometimes fails even while generateContent works with this API key.
+    fallbackModels = geminiModelCandidates(MODEL, process.env.GEMINI_FALLBACK_MODELS).slice(1);
+    console.log("Gemini fallback models:", fallbackModels.join(", "));
   }
-  console.log("Gemini backup models:", fallbackModels.join(", ") || "(none found)");
   return fallbackModels;
 }
 
@@ -104,8 +85,9 @@ function geminiErrorMessage(error, fallback) {
   if (status === 429) return "Your Gemini key hit its free per-minute limit on every model. Wait about a minute and try again.";
   if (status === 503) return "Gemini is busy right now. Wait a few seconds and try again.";
   if (!status) return "Couldn't reach Gemini. Check your internet connection and try again.";
-  if (status === 404) return "That Gemini model isn't available. Set GEMINI_MODEL in .env (for example gemini-3.8-flash) and restart the server.";
-  if (status === 400 || status === 403) return "Gemini rejected the request. Check GEMINI_API_KEY in .env.";
+  if (status === 404) return "None of the configured Gemini models accepted this request (404). Check GEMINI_MODEL and your key's available models in Google AI Studio. Try gemini-3.5-flash-lite, then restart the server.";
+  if (status === 403 || status === 401) return "Gemini refused access. Check GEMINI_API_KEY and model permissions in Google AI Studio.";
+  if (status === 400) return "Gemini rejected this request. Check the server terminal for the detailed model/API error.";
   return fallback;
 }
 
@@ -145,7 +127,28 @@ const taskSchema = {
     steps: {
       type: Type.ARRAY,
       items: { type: Type.STRING },
-      description: "Short, ordered actions the user can follow"
+      description: "Short, ordered actions the user can follow; never collapse a complex task into one generic instruction"
+    },
+    taskType: { type: Type.STRING, description: "One of find, place, sort, group, match, compare, sequence, identify, inspect, other" },
+    stepPlan: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          text: { type: Type.STRING, description: "One concrete, short, color-accessible user action" },
+          kind: { type: Type.STRING, description: "find for visual identification, manual for an action, check for optional after-photo verification" }
+        },
+        required: ["text", "kind"]
+      },
+      description: "Actionable order of steps. Preserve every meaningful operation, including sorting multiple groups, comparisons and sequences. Include a check step for physical changes."
+    },
+    groups: {
+      type: Type.ARRAY,
+      items: { type: Type.OBJECT, properties: {
+        name: { type: Type.STRING, description: "Color group name or visible matched category" },
+        color: { type: Type.STRING, description: "Color word when a color is specified" }
+      }, required: ["name"] },
+      description: "All grouping labels required by the user's instruction. Empty for a non-grouping task."
     },
     visualCues: {
       type: Type.ARRAY,
@@ -359,11 +362,13 @@ const sortSchema = {
 };
 
 // Sorting: box every item and give it a group name (usually its color) so a color-blind user can sort by label.
-async function sortItems(imagePart, things, destination) {
+async function sortItems(imagePart, instruction, things, destination) {
   const prompt = [
-    `Find every one of the ${things} in this image, for a user who is color blind and wants to sort them by color.`,
-    "For each item return \"box_2d\" as [ymin, xmin, ymax, xmax] normalized to 0-1000, role \"target\", and \"group\": a short, plain color name (for example red, navy blue, white striped).",
-    "Items that should go together must have exactly the same group name. Use as few groups as make sense.",
+    `User instruction: ${instruction}`,
+    `Find the relevant ${things || "objects"} visible in this image. Help a user who cannot reliably distinguish colors carry out THAT exact grouping, matching or sorting instruction.`,
+    `For each relevant item return "box_2d" as [ymin, xmin, ymax, xmax] normalized to 0-1000, role "target", and "group": a short consistent label using the user's actual grouping rule (color/shade when requested, not an arbitrary category).`,
+    "If the instruction matches items from different object types (e.g. pens with matching-color caps), label both items with the same group name. Different groups must have distinct names.",
+    "Items that should be grouped together must have identical group strings. Never invent items or count occluded objects.",
     destination ? `Also box ${destination} with role "destination" and group set to its name.` : "",
     "\"answer\": one or two short sentences saying how many items there are and what the groups are.",
     "Leave out anything that is not visible. Do not box people, skin, or clothing being worn unless asked."
@@ -414,7 +419,7 @@ router.post("/", async (req, res) => {
   if (!geminiReady(res)) return;
 
   const { text = "", image = null } = req.body ?? {};
-  const instruction = typeof text === "string" ? text.trim() : "";
+  const instruction = typeof text === "string" ? normalizeInstructionText(text) : "";
   if (!instruction && !image) {
     return res.status(400).json({ error: "Enter an instruction or attach a picture." });
   }
@@ -423,61 +428,28 @@ router.post("/", async (req, res) => {
   if (error) return res.status(status).json({ error });
 
   try {
-    // Fast path: for simple instructions like "where is the pink pen" or "put the green block in Box B",
-    // read the words locally and make just one Gemini request to find the object.
+    // Interpret the entire instruction before attempting object localization.
+    // Never use the local one-object parser as a shortcut for camera tasks:
+    // that silently destroys sorting, matching, comparison and multi-step plans.
     const quick = instruction ? parseInstruction(instruction) : null;
-    const quickTarget = quick ? describeTarget(quick) : "";
-
-    // Sorting: "sort the socks", "group the blocks by color".
-    if (imagePart && quick && isSortTask(quick)) {
-      const { locations, answer, groups } = await sortItems(imagePart, quickTarget || "items", quick.destination);
-      return res.json({
-        summary: describeTask(quick),
-        steps: [],
-        visualCues: [],
-        targetColor: "",
-        targetObject: quick.object || "items",
-        action: quick.action,
-        destination: quick.destination,
-        relation: quick.relation,
-        completionHint: "",
-        answer,
-        locations,
-        groups,
-        locateBusy: false
-      });
-    }
-
-    if (imagePart && quickTarget) {
-      const { locations, answer } = await locateWithAnswer(imagePart, quickTarget, quick.destination);
-      return res.json({
-        summary: describeTask(quick),
-        steps: [],
-        visualCues: [],
-        targetColor: quick.color,
-        targetObject: quick.object,
-        action: quick.action,
-        destination: quick.destination,
-        relation: quick.relation,
-        completionHint: "",
-        answer,
-        locations,
-        locateBusy: false
-      });
-    }
+    const originalColor = instruction ? requestedHueDoColor(instruction) : "";
 
     const prompt = [
-      "You are the task interpreter for an accessibility app for people who cannot rely on color.",
-      "Interpret the complete instruction, whatever its subject or action. Do not assume it is a color-sorting task or that it has a destination.",
-      "Split the instruction into its parts: targetColor (the color of the thing to act on, as the user said it), targetObject (the thing, without the color word), action (one verb such as place, put, find, press), destination, and relation.",
-      "Example: 'Place the green block into Box B.' -> targetColor green, targetObject block, action place, destination Box B, relation into.",
-      "Example: 'Where is the pink pen?' -> targetColor pink, targetObject pen, action find, no destination.",
-      "Steps must break the task down for someone who cannot rely on color. Never just repeat the instruction as one step.",
+      "You are HueDo, a color-dependent task assistant for people who cannot reliably distinguish colors.",
+      "Understand and honor the WHOLE instruction. It may request sorting items by color, matching similarly colored items, grouping shades, arranging an order or pattern, comparing colors, identifying a particular colored object, reading a colored label, or several sequential actions.",
+      "Do not reduce a multi-item task to one target and destination. Do not infer that every task involves physically moving an object.",
+      "Color-family requests are inclusive: a dusty lavender object is purple, a navy pen is blue, and a sage object is green. If a camera image supports a more specific shade, name that observed shade as an additional hint without replacing the user's requested color or inventing certainty.",
+      "Do not confuse near-neighbor shades or assert that a colored object is outlined unless the actual camera color region is verified.",
+      "Return an honest taskType and stepPlan. For each step, use kind=find for looking at an object, kind=manual for actions/comparisons, kind=check for checking a physical result from a new picture. Include multiple concrete steps if needed, typically 2-6.",
+      "Your steps must be actionable without distinguishing colors unaided. Use visible positions, object types, group labels and approximate counts when supported by the image. Never claim an object is circled or verified until it has a visible location.",
+      "For sorting/grouping/matching, describe every requested group and the rule for membership. In targetObject, use the plural items involved (like pens, socks, cards, blocks). Put only ONE most important color in targetColor; leave it empty when multiple colors are involved. The groups array should list all groups if known.",
+      "For sequences, preserve the specified order. For finding/comparing, answer the question and guide the user without inventing a physical movement.",
+      "The completionHint must describe observable evidence for THE ORIGINAL INSTRUCTION, not merely locating the target. If a result cannot be checked from one photo, say what remains uncertain.",
       imagePart
-        ? "A picture of the user's surroundings is attached. Find the target object (and the destination, if any) in it. For each one you can actually see, add a location with box_2d as [ymin, xmin, ymax, xmax] scaled 0 to 1000. Look carefully at colors: do not box skin, lips, or clothing unless that is what was asked for. If the target is not visible, return no target location and say so in answer. If there is no instruction text, the picture may contain written instructions: read them."
-        : "No picture is attached, so return empty locations and an empty answer.",
-      "Do not invent objects, destinations, or directions. Leave unknown optional fields empty.",
-      instruction ? `Instruction text: ${instruction}` : "Read and interpret the instruction from the attached picture."
+        ? "A picture of the user's surroundings is attached. Identify only visible, relevant objects, their locations, counts and distinguishing landmarks. Provide location boxes for visible targets and destinations when you can; never invent bounding boxes. If the requested object is missing, say so and leave locations empty. If there is no instruction text, interpret visible written instructions."
+        : "No picture is attached. Interpret the text into steps now, but do not claim any object is visible. Return empty locations and an empty answer.",
+      "Do not invent objects, completed actions, exact colors under uncertain lighting, or directions.",
+      instruction ? `Full instruction (follow exactly): ${instruction}` : "Read and interpret any instructions visible in the attached picture."
     ].join("\n");
 
     const parts = [{ text: prompt }];
@@ -488,18 +460,31 @@ router.post("/", async (req, res) => {
       return res.status(422).json({ error: "Gemini could not interpret a usable task. Try rephrasing the instruction." });
     }
 
-    let locations = imagePart ? cleanLocations(parsed.locations) : [];
+    let locations = imagePart ? cleanLocations(parsed.locations, String(parsed.destination || ""), 16) : [];
     let locateBusy = false;
+    let groups = Array.isArray(parsed.groups)
+      ? parsed.groups.slice(0, 12).map((group) => ({ name: String(group?.name || "").trim(), color: String(group?.color || "").trim() })).filter((group) => group.name)
+      : [];
+    const taskType = taskTypeOf({ taskType: parsed.taskType, action: parsed.action });
+    const multiItemTask = isMultiObjectTask({ taskType, action: parsed.action, groups });
     if (imagePart) {
-      {
-        const target = [parsed.targetColor, parsed.targetObject].filter(Boolean).join(" ").trim() || String(parsed.summary);
-        try {
-          const detected = await detectObjects(imagePart, target, String(parsed.destination || "").trim());
+      const target = [parsed.targetColor, parsed.targetObject].filter(Boolean).join(" ").trim();
+      try {
+        if (multiItemTask) {
+          const detected = await sortItems(imagePart, instruction || parsed.summary, parsed.targetObject || "items", String(parsed.destination || "").trim());
+          if (detected.locations.length) {
+            locations = detected.locations;
+            groups = detected.groups;
+            if (detected.answer) parsed.answer = detected.answer;
+          }
+        } else if (target || parsed.destination) {
+          const detected = await detectObjects(imagePart, target || "requested object", String(parsed.destination || "").trim());
           if (detected.length) locations = detected;
-        } catch (error) {
-          console.error("Gemini detection error:", error.message);
-          locateBusy = true;
         }
+      } catch (error) {
+        console.error("Gemini object localization error:", error.message);
+        locateBusy = true;
+        // Keep boxes obtained in the first structured request when possible.
       }
     }
 
@@ -516,10 +501,21 @@ router.post("/", async (req, res) => {
       : [];
 
     res.json({
-      summary: String(parsed.summary).trim(),
-      steps: Array.isArray(parsed.steps) ? parsed.steps.map((step) => String(step).trim()).filter(Boolean).slice(0, 8) : [],
+      // Always preserve the exact user instruction for the guide and final check.
+      // Gemini's short summary can accidentally omit a color, quantity or step.
+      summary: instruction || String(parsed.summary).trim(),
+      steps: Array.isArray(parsed.steps) ? parsed.steps.map((step) => String(step).trim()).filter(Boolean).slice(0, 12) : [],
+      planSteps: Array.isArray(parsed.stepPlan) ? parsed.stepPlan.slice(0, 12).map((step) => ({
+        text: String(step?.text || "").trim().slice(0, 350),
+        kind: String(step?.kind || "manual").trim().toLowerCase()
+      })).filter((step) => step.text) : [],
+      planSource: "gemini",
+      taskType,
+      groups,
       visualCues,
-      targetColor: String(parsed.targetColor || "").trim().toLowerCase(),
+      // Preserve the explicit requested shade ("purple" remains "purple") even
+      // if Gemini calls the observed surface "dusty lavender" in its answer.
+      targetColor: multiItemTask ? "" : (originalColor || String(parsed.targetColor || "").trim().toLowerCase()),
       targetObject: String(parsed.targetObject || "").trim(),
       action: String(parsed.action || "").trim().toLowerCase(),
       destination: String(parsed.destination || "").trim(),
@@ -539,28 +535,40 @@ router.post("/", async (req, res) => {
 router.post("/check", async (req, res) => {
   if (!geminiReady(res)) return;
 
-  const { image = null, task = {} } = req.body ?? {};
+  const { image = null, beforeImage = null, task = {} } = req.body ?? {};
   if (!image) return res.status(400).json({ error: "Take a new picture to check the task." });
   const { part: imagePart, error, status } = readImage(image);
   if (error) return res.status(status).json({ error });
+  const reference = beforeImage ? readImage(beforeImage) : { part: null };
+  if (reference.error) return res.status(reference.status).json({ error: reference.error });
 
   const summary = String(task.summary || "").slice(0, 300);
   const target = String(task.target || "").slice(0, 100);
   const destination = String(task.destination || "").slice(0, 100);
+  const taskType = taskTypeOf(task);
+  const groups = Array.isArray(task.groups) ? task.groups.slice(0, 16).map((group) => String(group?.name || "")).filter(Boolean) : [];
 
   try {
     const prompt = [
-      "You check whether a simple physical task has been completed, for a user who cannot rely on color.",
-      `Task: ${summary}`,
-      target ? `Target object: ${target}` : "",
+      "You evaluate completion of a COLOR-DEPENDENT instruction for someone who cannot distinguish colors reliably.",
+      `Original task: ${summary}`,
+      `Task kind: ${taskType}`,
+      target ? `Target objects: ${target}` : "",
       destination ? `Destination: ${destination}` : "",
-      "Look at the attached picture. Set done to true only if it clearly shows the task is complete (for example the target object is inside or on the destination, or for a sorting task every item is next to the items that match it).",
-      "Return JSON: {\"done\": true or false, \"message\": one short sentence for the user without relying on color alone, \"objects\": a list where each entry has \"box_2d\" as [ymin, xmin, ymax, xmax] normalized to 0-1000, a short \"label\", and \"role\" (target or destination)}."
+      groups.length ? `Requested/identified groups: ${groups.join(", ")}` : "",
+      task.completionHint ? `Expected visible result: ${String(task.completionHint).slice(0, 250)}` : "",
+      "Evaluate the ENTIRE instruction. For sorting or matching, each relevant object must be in the correct group/pair. For sequences, the end state must support the claimed result; do not claim unseen actions happened.",
+      reference.part ? "The FIRST image is the starting situation, the SECOND image is the current result. Use both to assess the change. Do not assume success merely because a target is visible." : "The attached image is the current result.",
+      "If some items are hidden, the lighting makes colors ambiguous, or completion cannot be established visually, return done=false and explain what to show or change next. Avoid false confidence.",
+      "A broad color request may match a more specific shade (for example dusty lavender is a purple shade). Judge the actual pixels and distinguish similar neighboring shades when the instruction requires it.",
+      "Classify outcome as complete, incorrect (wrong objects or colors), incomplete (remaining work), or uncertain (insufficient evidence). For every false result name the specific mistake or missing evidence, not a vague failure.",
+      'Return JSON: {"done":boolean,"outcome":"complete|incorrect|incomplete|uncertain","message":"one actionable sentence","issues":["specific mismatch or missing evidence"],"objects":[{"label":"...","role":"target","box_2d":[0,0,1000,1000]}]}.' 
     ].filter(Boolean).join("\n");
 
+    const imageParts = reference.part ? [reference.part, imagePart] : [imagePart];
     const response = await generateWithRetry({
-      contents: [{ role: "user", parts: [{ text: prompt }, imagePart] }],
-      config: { responseMimeType: "application/json", temperature: 0.2 }
+      contents: [{ role: "user", parts: [{ text: prompt }, ...imageParts] }],
+      config: { responseMimeType: "application/json", temperature: 0.1 }
     });
     let parsed = {};
     try {
@@ -569,8 +577,7 @@ router.post("/check", async (req, res) => {
       parsed = {};
     }
     res.json({
-      done: parsed.done === true,
-      message: String(parsed.message || "").trim(),
+      ...normalizeHueDoVerification(parsed),
       locations: cleanLocations(parsed.objects || parsed.locations, destination, 16)
     });
   } catch (error) {

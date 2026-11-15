@@ -68,7 +68,7 @@ test("a destination's color is not taken as the object's color", () => {
   assert.equal(task.action, "put");
   assert.equal(task.destination, "green box");
   assert.equal(describeTask(task), "Put the pens into the green box.");
-  assert.match(buildGuideSteps(task)[0].text, /the pens are circled/);
+  assert.match(buildGuideSteps(task)[0].text, /Find the pens in the camera view/);
 });
 
 test("polite questions and picture words are ignored", () => {

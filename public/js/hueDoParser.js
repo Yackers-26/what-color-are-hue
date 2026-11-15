@@ -20,7 +20,8 @@ const ACTION_WORDS = [
   "place", "put", "move", "drop", "insert", "set", "stack", "slide", "push", "pull", "bring", "take",
   "pick up", "pick", "grab", "find", "locate", "identify", "point to", "touch", "press", "click",
   "tap", "where", "show", "open", "close", "sort", "organize", "organise", "group", "separate", "match",
-  "connect", "plug", "turn", "flip", "cut", "fold", "color", "draw"
+  "connect", "plug", "turn", "flip", "cut", "fold", "color", "draw",
+  "compare", "choose", "select", "count", "arrange", "pair", "classify", "label", "read", "rank", "order"
 ];
 
 // Actions that mean "put things into groups by color".
@@ -66,11 +67,18 @@ function findAction(lower) {
   return best;
 }
 
+// Correct only common fused command words; do not rewrite the user's task.
+// E.g. "Help meput the purple socks on the blue notebook" is a placement request.
+export function normalizeInstructionText(text = "") {
+  return String(text).replace(/\b(help\s+me)(put|place|move|find|sort|match|group|arrange|pick)\b/gi,
+    (_, prefix, action) => `${prefix} ${action}`).replace(/\s+/g, " ").trim();
+}
+
 // Rule-based reading, used for the fast path and when Gemini is unavailable.
 // "Place the green block into Box B." -> { color: "green", object: "block", action: "place", destination: "Box B" }
 // "Put the pens in the green box."    -> { color: "", object: "pens", action: "put", destination: "green box" }
 export function parseInstruction(text = "") {
-  const sentence = String(text).replace(/\s+/g, " ").trim();
+  const sentence = normalizeInstructionText(text);
   const working = sentence.replace(POLITE_START, "").replace(PICTURE_WORDS, " ").replace(/\s+/g, " ").trim();
   const lower = working.toLowerCase();
 
@@ -148,7 +156,79 @@ export function isPlural(object = "") {
 // The thing to look for, e.g. "pink pen" (falls back to "pink item").
 export function describeTarget({ color = "", object = "" } = {}) {
   const colorName = String(color || "").trim().toLowerCase();
-  return [colorName, object || (colorName ? "item" : "")].filter(Boolean).join(" ").trim();
+  let objectName = String(object || "").trim();
+  // Gemini sometimes returns color="dark blue", object="dark pen" or
+  // object="dark blue pen". Don't tell the user to find a "dark blue dark pen".
+  const tokens = colorName.split(/\s+/).filter(Boolean);
+  const words = objectName.split(/\s+/).filter(Boolean);
+  while (words.length > 1 && tokens.includes(words[0].toLowerCase())) words.shift();
+  objectName = words.join(" ");
+  return [colorName, objectName || (colorName ? "item" : "")].filter(Boolean).join(" ").trim();
+}
+
+// Keep Gemini's summary when possible, but remove duplicate color words
+// introduced by splitting "dark blue pen" into color + object fields.
+export function cleanTaskSummary(task = {}) {
+  const summary = String(task.summary || "").trim();
+  if (!summary) return describeTask(task);
+  const rawTarget = [String(task.color || "").trim(), String(task.object || "").trim()]
+    .filter(Boolean).join(" ");
+  const cleanTarget = describeTarget(task);
+  if (!rawTarget || rawTarget.toLowerCase() === cleanTarget.toLowerCase()) return summary;
+  const escaped = rawTarget.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Use direct case-insensitive replacement, preserving the rest of the task.
+  return summary.replace(new RegExp(escaped, "gi"), cleanTarget);
+}
+
+
+// The old single-target object parser is a useful offline fallback. Gemini's
+// multi-step plan takes priority when available; do not rewrite "sort", "compare",
+// or multi-target instructions into a single "put X into Y" action.
+export const TASK_TYPES = ["find", "place", "sort", "group", "match", "compare", "sequence", "identify", "inspect", "other"];
+
+export function taskTypeOf(task = {}) {
+  const explicit = String(task.taskType || "").trim().toLowerCase();
+  if (TASK_TYPES.includes(explicit) && explicit !== "other") return explicit;
+  const action = String(task.action || "").trim().toLowerCase();
+  if (["sort", "organize", "organise", "separate"].includes(action)) return "sort";
+  if (action === "group") return "group";
+  if (["match", "pair"].includes(action)) return "match";
+  if (action === "classify") return "group";
+  if (["compare", "choose", "pick", "select", "tell"].includes(action)) return "compare";
+  if (["find", "locate", "where", "identify", "show", "point to"].includes(action)) return "find";
+  if (["put", "place", "move", "insert", "stack", "drop", "set"].includes(action)) return "place";
+  return explicit === "other" ? "other" : "sequence";
+}
+
+export function isMultiObjectTask(task = {}) {
+  return ["sort", "group", "match"].includes(taskTypeOf(task)) ||
+    (Array.isArray(task.groups) && task.groups.length > 1);
+}
+
+function safePlanKind(kind = "", text = "") {
+  const requested = String(kind).trim().toLowerCase();
+  if (["find", "locate", "identify", "observe"].includes(requested)) return "find";
+  if (["check", "verify", "review", "confirm", "place"].includes(requested)) return "place";
+  if (["act", "action", "manual", "perform", "move", "sort", "group", "compare"].includes(requested)) return "manual";
+  const sentence = String(text).toLowerCase();
+  if (/^(locate|find|identify|look for|look at|inspect|notice)\b/.test(sentence)) return "find";
+  if (/\b(check with a (new )?picture|verify with a (new )?picture|take (a )?new picture)\b/.test(sentence)) return "place";
+  return "manual";
+}
+
+function mentionsGroup(text = "", name = "") {
+  const escaped = String(name).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if (!escaped) return false;
+  return new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, "i").test(String(text));
+}
+
+export function normalizeGeminiStepPlan(plan = []) {
+  if (!Array.isArray(plan)) return [];
+  return plan.slice(0, 12).flatMap((part) => {
+    const text = String(typeof part === "string" ? part : part?.text || "").trim().slice(0, 350);
+    if (!text) return [];
+    return [{ kind: safePlanKind(part?.kind || "", text), text }];
+  });
 }
 
 const FIND_ACTIONS = ["find", "locate", "identify", "where", "point to", "show"];
@@ -158,6 +238,34 @@ const FIND_ACTIONS = ["find", "locate", "identify", "where", "point to", "show"]
 // place  - user does the task, then takes a new picture to check
 // manual - user presses Next / Done
 export function buildGuideSteps(task = {}) {
+  if (task.planSource === "gemini") {
+    const planned = normalizeGeminiStepPlan(task.planSteps?.length ? task.planSteps : task.steps);
+    if (planned.length) {
+      const groups = Array.isArray(task.groups) ? task.groups.filter((group) => group?.name) : [];
+      // A camera-identified sorting task gains explicit group instructions, not
+      // just "put colors together". Never invent counts without image evidence.
+      if (isMultiObjectTask(task) && groups.length &&
+          !groups.every((group) => planned.some((step) => mentionsGroup(step.text, group.name)))) {
+        const lastIsCheck = planned.at(-1)?.kind === "place";
+        const insertAt = lastIsCheck ? planned.length - 1 : planned.length;
+        const unique = groups.slice(0, 8).filter((group) =>
+          !planned.some((step) => mentionsGroup(step.text, group.name)))
+          .map((group) => ({ kind: "manual", text: `Group the ${group.name} items together${Number(group.count) > 0 ? ` (${group.count} identified)` : ""}.` }));
+        planned.splice(insertAt, 0, ...unique);
+      }
+      // Physical color arrangements can be assessed from a fresh image.
+      // Nonphysical tasks (such as comparisons and questions) should not
+      // imply a photographic completion check.
+      const taskKind = taskTypeOf(task);
+      const physicallyRearranges = /\b(put|place|move|sort|group|arrange|stack|insert|drop)\b/i.test(String(task.summary || ""));
+      const physical = ["place", "sort", "group", "match"].includes(taskKind) ||
+        (taskKind === "sequence" && physicallyRearranges);
+      if (physical && !planned.some((step) => step.kind === "place")) {
+        planned.push({ kind: "place", text: "When finished, press Check with a new picture to review the arrangement." });
+      }
+      return planned.slice(0, 12);
+    }
+  }
   const target = describeTarget({ color: task.color, object: task.object });
   const destination = String(task.destination || "").trim();
   const action = String(task.action || "").trim().toLowerCase();
@@ -166,7 +274,7 @@ export function buildGuideSteps(task = {}) {
 
   if (isSortTask(task)) {
     const things = target || "items";
-    steps.push({ kind: "find", text: `Look at the picture: each ${things.replace(/s$/, "")} is circled and labeled with its group.` });
+    steps.push({ kind: "find", text: `Look for ${things} in the camera view. Check any outlines or labels before sorting.` });
     const groups = Array.isArray(task.groups) ? task.groups.filter((group) => group?.name) : [];
     groups.forEach((group) => {
       const count = Number(group.count) > 0 ? ` (${group.count})` : "";
@@ -180,7 +288,7 @@ export function buildGuideSteps(task = {}) {
   const isAre = isPlural(task.object) ? "are" : "is";
 
   if (target) {
-    steps.push({ kind: "find", text: `Look at the picture: ${article(target)} ${isAre} circled.` });
+    steps.push({ kind: "find", text: `Find ${article(target)} in the camera view. Follow the outline when a matching region appears.` });
   }
 
   if (target && destination) {

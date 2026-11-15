@@ -30,7 +30,7 @@ test("live HueDo, reset behavior, concise speech, and real dark theme are wired"
     read("../public/login.html"), read("../public/login.js"), read("../public/login.css")
   ]);
   assert.match(html, /id="themeToggle"/);
-  assert.match(html, /With the webcam on, Build visual guide analyzes the current frame/);
+  assert.match(html, /Describe any color-dependent task: sort, group, match, compare/);
   assert.doesNotMatch(html, /LIVE COLOR TOOLS|COLOR WORKSPACE|HACKUMASS XIV/);
   assert.doesNotMatch(loginHtml, /PERSONAL COLOR WORKSPACE|HACKUMASS XIV/);
   assert.match(loginHtml, /id="authThemeToggle"/);

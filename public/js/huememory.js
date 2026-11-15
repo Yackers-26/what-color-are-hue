@@ -25,8 +25,8 @@ export function loadPalette() { return request("/api/colors"); }
 export async function removeColor(id) { const result = await request(`/api/colors/${encodeURIComponent(id)}`, { method: "DELETE" }); announceChange(); return result; }
 export async function resetPalette() { const result = await request("/api/colors", { method: "DELETE" }); announceChange(); return result; }
 export function getStats() { return request("/api/colors/stats"); }
-export function createTask({ summary, steps = [], visualCues = [], color = "", object = "", action = "", destination = "", relation = "", groups = [], locations = [], answer = "", sceneImage = null }) {
-  return request("/api/tasks", { method: "POST", body: JSON.stringify({ summary, steps, visualCues, color, object, action, destination, relation, groups, locations, answer, sceneImage }) });
+export function createTask({ summary, steps = [], planSteps = [], planSource = "", taskType = "", completionHint = "", visualCues = [], color = "", object = "", action = "", destination = "", relation = "", groups = [], locations = [], answer = "", sceneImage = null }) {
+  return request("/api/tasks", { method: "POST", body: JSON.stringify({ summary, steps, planSteps, planSource, taskType, completionHint, visualCues, color, object, action, destination, relation, groups, locations, answer, sceneImage }) });
 }
 export function loadTasks({ completed } = {}) {
   const params = new URLSearchParams();
@@ -38,4 +38,4 @@ export function completeTask(id, completed = true) { return request(`/api/tasks/
 export function interpret(text = "", image = null) { return request("/api/interpret", { method: "POST", body: JSON.stringify({ text, image }) }); }
 // Gemini checks a NEW still frame, not old color-zone heuristics. It reports a
 // visual assessment, which users should not treat as infallible physical proof.
-export function checkTask(image, task) { return request("/api/interpret/check", { method: "POST", body: JSON.stringify({ image, task }) }); }
+export function checkTask(image, task, beforeImage = null) { return request("/api/interpret/check", { method: "POST", body: JSON.stringify({ image, task, beforeImage }) }); }

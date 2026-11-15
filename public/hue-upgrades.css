@@ -392,3 +392,16 @@ body[data-theme="dark"] .hue-find-suggestion-dialog::backdrop { background: rgba
   body[data-theme="dark"] *::before,
   body[data-theme="dark"] *::after { transition-duration: .01ms !important; }
 }
+
+/* HueDo's multi-object task summary inherits the existing typography. */
+.task-kind-summary {
+  margin: 8px 0 14px;
+  color: var(--muted, #697068);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* HueDo: persistent verification feedback and observed shade. Match existing cards. */
+.huedo-shade-hint { margin: 10px 0 2px; padding: 9px 11px; border-left: 3px solid #87b8a1; background: rgba(134,183,159,.10); color: inherit; font-size: 12px; line-height: 1.5; }
+.huedo-check-feedback { margin: 10px 0 2px; padding: 11px 12px; border: 1px solid #b96759; border-left: 4px solid #c26b5b; border-radius: 5px; background: rgba(185,67,52,.12); color: inherit; font-size: 13px; line-height: 1.5; font-weight: 600; }
+.huedo-check-feedback.is-uncertain { border-color: #b99d65; border-left-color: #b99d65; background: rgba(195,160,88,.13); }

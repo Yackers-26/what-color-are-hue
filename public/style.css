@@ -467,16 +467,6 @@ input[type="file"] { position: absolute; width: 1px; height: 1px; overflow: hidd
   outline-offset: 3px;
 }
 .sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0,0,0,0) !important; white-space: nowrap !important; border: 0 !important; }
-html.large-text { font-size: 112.5%; }
-html.large-text body { font-size: 16px; }
-body.high-contrast {
-  --page: #fff; --surface: #fff; --surface-soft: #f1f1f1; --surface-tint: #e8e8e8;
-  --ink: #000; --muted: #242424; --subtle: #333; --line: #777; --line-strong: #444;
-  --brand: #003b32; --brand-deep: #002b25; --brand-soft: #e1eee8; --accent: #8a3215;
-  --focus: #b00020; --shadow: none; --shadow-soft: none;
-}
-body.high-contrast .mode-panel, body.high-contrast .feature-card, body.high-contrast .active-task-card, body.high-contrast .task-library-card { border-width: 2px; }
-body.high-contrast :focus-visible { outline-width: 4px; }
 
 @media (max-width: 980px) {
   .workspace-grid { grid-template-columns: minmax(0, 1fr); }
@@ -669,4 +659,3 @@ body.high-contrast :focus-visible { outline-width: 4px; }
 .guide-steps li.is-done { color: var(--success); text-decoration: line-through; }
 .guide-steps li.is-done::marker { content: "✓ "; }
 .camera-stage.is-scene #outputCanvas { cursor: default; }
-body.high-contrast .guide-step-card, body.high-contrast .guide-done { border-width: 3px; }

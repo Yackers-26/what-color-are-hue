@@ -6,9 +6,10 @@ import { calculateNeutralGains, neutralReferenceFromCenter } from "/src/vision/c
 import { closestReferenceShade } from "/src/vision/referenceColors.js";
 import { sanitizeGeminiShade } from "/src/vision/shadeNaming.js";
 import { describeDetailedShade, createShadeIdentityTracker } from "/src/vision/perceptualShade.js";
-import { resolveFindShade, suggestFindShadeNames, findClosestVisibleShade } from "/src/vision/hueFindSearch.js";
+import { resolveFindShade, suggestFindShadeNames, findClosestVisibleShade, listFindShadeNames } from "/src/vision/hueFindSearch.js";
 import { averagePixelRegion } from "/src/vision/sampleColor.js";
 import { LiveObjectTracker } from "/src/vision/liveObjectTracker.js";
+import { findHueDoColorRegions, isReliableHueDoOutline } from "/src/vision/hueDoColorGuide.js";
 import { createFluidReading } from "/src/vision/fluidReading.js";
 import {
   saveColor,
@@ -20,8 +21,8 @@ import {
   checkTask
 } from "/js/huememory.js";
 import {
-  parseInstruction, buildGuideSteps, describeTask, describeTarget,
-  normalizeRelation, normalizeColorName, isPlural, isSortTask
+  parseInstruction, buildGuideSteps, describeTask, describeTarget, cleanTaskSummary,
+  normalizeRelation, normalizeColorName, isPlural, isSortTask, taskTypeOf, isMultiObjectTask
 } from "/js/hueDoParser.js";
 import { mountPalette } from "/js/palettePanel.js";
 import { mountImagePicker } from "/js/imagePicker.js";
@@ -105,8 +106,6 @@ const saveColorBtn = $("saveColorBtn");
 const saveColorStatus = $("saveColorStatus");
 const detectedColorsList = $("detectedColors");
 const themeToggle = $("themeToggle");
-const contrastToggle = $("contrastToggle");
-const textSizeToggle = $("textSizeToggle");
 const colorChipToggle = $("colorChipToggle");
 const colorChipToggleText = $("colorChipToggleText");
 const cameraChipLayer = $("cameraChipLayer");
@@ -122,6 +121,8 @@ const interpretBtn = $("interpretBtn");
 const interpretStatus = $("interpretStatus");
 const parsedTask = $("parsedTask");
 const taskSourceNote = $("taskSourceNote");
+const taskKindSummary = $("taskKindSummary");
+const taskSimpleFields = $("taskSimpleFields");
 const taskReadback = $("taskReadback");
 const taskColorInput = $("taskColorInput");
 const taskObjectInput = $("taskObjectInput");
@@ -131,6 +132,8 @@ const taskAnswer = $("taskAnswer");
 const snapshotBtn = $("snapshotBtn");
 const clearSceneBtn = $("clearSceneBtn");
 const checkPictureBtn = $("checkPictureBtn");
+const hueDoShadeHint = $("hueDoShadeHint");
+const hueDoCheckFeedback = $("hueDoCheckFeedback");
 const readTaskBtn = $("readTaskBtn");
 const taskStepsPreview = $("taskStepsPreview");
 const guideStepCard = $("guideStepCard");
@@ -185,11 +188,14 @@ const hueSeeShadeIdentity = createShadeIdentityTracker();
 const SAMPLE_INTERVAL_MS = 32;
 const FRAME_INTERVAL_MS = 180;
 const FIND_INTERVAL_MS = 95;
-const hueFindTracker = new SmoothContourTracker({ blend: .32, confirmationFrames: 2, holdFrames: 6 });
-const hueDoColorTracker = new SmoothContourTracker({ blend: .42, confirmationFrames: 1, holdFrames: 3 });
+const hueFindTracker = new SmoothContourTracker({ blend: .32, confirmationFrames: 2, holdFrames: 2 });
+const hueDoColorTracker = new SmoothContourTracker({ blend: .42, confirmationFrames: 2, holdFrames: 1 });
 const hueDoTrackers = { target: new LiveObjectTracker(), destination: new LiveObjectTracker() };
+const hueDoMultiTrackers = []; // independent templates for objects in sort/group/match tasks
 let hueDoLastResults = { target: null, destination: null };
 let hueDoLastFrame = 0;
+let hueDoHasVerifiedTarget = false;
+let hueDoCheckReference = null;
 let hueDoReferenceLabels = { target: "Target", destination: "Destination" };
 let focusedContourId = null;
 let pendingFocusPoint = null;
@@ -266,6 +272,9 @@ function setActiveMode(mode) {
   if (currentMode !== nextMode) { hueFindTracker.reset(); focusedContourId = null; pendingFocusPoint = null; hueSeeShadeIdentity.reset(); }
   const leavingScene = currentMode === "do" && nextMode !== "do" && Boolean(scenePhoto);
   currentMode = nextMode;
+  // Photo capture belongs exclusively to HueDo, even while the camera is live.
+  snapshotBtn.hidden = nextMode !== "do";
+  snapshotBtn.disabled = !streaming || nextMode !== "do";
   updateColorChipToggleCopy();
   if (leavingScene) {
     cameraFrame.classList.remove("is-scene");
@@ -340,6 +349,36 @@ function setCameraStatus(message, state = "off") {
 
 function setFeedback(element, message) {
   if (element && element.textContent !== message) element.textContent = message;
+}
+
+// Keep photo-check errors visible even while the live camera refreshes taskResult.
+function showHueDoCheckFeedback(result = null) {
+  if (!hueDoCheckFeedback) return;
+  if (!result) {
+    hueDoCheckFeedback.hidden = true;
+    hueDoCheckFeedback.classList.remove("is-uncertain");
+    hueDoCheckFeedback.textContent = "";
+    return;
+  }
+  const uncertain = result.outcome === "uncertain";
+  const label = uncertain ? "Can't verify yet" : "Task not completed";
+  const detail = result.issues?.length ? ` ${result.issues.join(" ")}` : "";
+  hueDoCheckFeedback.textContent = `${label}: ${result.message}${detail}`;
+  hueDoCheckFeedback.classList.toggle("is-uncertain", uncertain);
+  hueDoCheckFeedback.hidden = false;
+}
+
+function showHueDoObservedShade(region, query, { anchored = false } = {}) {
+  if (!hueDoShadeHint) return;
+  const requested = String(query || "").trim();
+  const found = String(region?.observedShade || "").trim();
+  if (!requested || !found || !region?.broadMatch) {
+    hueDoShadeHint.hidden = true;
+    hueDoShadeHint.textContent = "";
+    return;
+  }
+  hueDoShadeHint.textContent = `Requested ${requested} → matched visible shade: ${found}. ${anchored ? "Color region is inside the suggested object." : "Possible matching color; confirm the object."}`;
+  hueDoShadeHint.hidden = false;
 }
 
 function normalizeColorCategory(value = "") {
@@ -609,7 +648,7 @@ toggleCamBtn.addEventListener("click", async () => {
     toggleCamLabel.textContent = "Stop camera";
     colorSelect.disabled = false;
     scanSceneBtn.disabled = false;
-    snapshotBtn.disabled = false;
+    snapshotBtn.disabled = currentMode !== "do";
     refreshGuideStatus();
     cameraPlaceholder.classList.add("is-hidden");
     setCameraStatus("Camera on", "live");
@@ -1343,18 +1382,6 @@ function applyTheme(theme, persist = false) {
 applyTheme(activeTheme);
 themeToggle?.addEventListener("click", () => applyTheme(activeTheme === "dark" ? "light" : "dark", true));
 
-contrastToggle.addEventListener("click", () => {
-  const enabled = document.body.classList.toggle("high-contrast");
-  contrastToggle.setAttribute("aria-pressed", String(enabled));
-  contrastToggle.querySelector("span:last-child").textContent = enabled ? "Standard" : "Contrast";
-});
-
-textSizeToggle.addEventListener("click", () => {
-  const enabled = document.documentElement.classList.toggle("large-text");
-  textSizeToggle.setAttribute("aria-pressed", String(enabled));
-  textSizeToggle.querySelector("span:last-child").textContent = enabled ? "Standard" : "Text size";
-});
-
 colorChipToggle.addEventListener("click", () => {
   showColorChips = !showColorChips;
   colorChipToggle.setAttribute("aria-pressed", String(showColorChips));
@@ -1676,9 +1703,11 @@ function drawAreaBox(rect, accent, fill = "") {
 function resetHueDoTracking() {
   hueDoTrackers.target.reset();
   hueDoTrackers.destination.reset();
+  hueDoMultiTrackers.splice(0).forEach((item) => item.tracker.reset());
   hueDoColorTracker.reset();
   hueDoLastResults = { target: null, destination: null };
   hueDoLastFrame = 0;
+  hueDoHasVerifiedTarget = false;
   hueDoReferenceLabels = { target: "Target", destination: "Destination" };
   clearVectorOutline();
 }
@@ -1692,8 +1721,16 @@ function seedHueDoTrackers() {
   samplingCanvas.height = height;
   samplingContext.drawImage(scenePhoto.image, 0, 0, width, height);
   const referenceFrame = samplingContext.getImageData(0, 0, width, height);
-  const target = sceneLocations.find((location) => location.role === "target");
+  const targetLocations = sceneLocations.filter((location) => location.role === "target").slice(0, 16);
+  const target = targetLocations[0];
   const destination = sceneLocations.find((location) => location.role === "destination");
+  if (isMultiObjectTask(activeTask) && targetLocations.length > 1) {
+    targetLocations.forEach((location) => {
+      const tracker = new LiveObjectTracker();
+      tracker.seed(referenceFrame, location.box);
+      hueDoMultiTrackers.push({ tracker, label: location.label || "item" });
+    });
+  }
   if (target) {
     hueDoTrackers.target.seed(referenceFrame, target.box);
     hueDoReferenceLabels.target = target.label || targetLabel();
@@ -1703,6 +1740,71 @@ function seedHueDoTrackers() {
     hueDoReferenceLabels.destination = destination.label || destinationLabel();
   }
   return Boolean(target || destination);
+}
+
+// Grouping/matching has MULTIPLE relevant objects. Keep an independent
+// visual template for each one instead of drawing just the first "target".
+// Local contours indicate matching pixels, while dotted boxes are only
+// Gemini-suggested objects and must not be claimed as verified color matches.
+const hueDoCatalogPhrases = listFindShadeNames().sort((a, b) => b.length - a.length)
+  .map(name => ({ name, phrase: ` ${name.toLowerCase().replace(/[^a-z]+/g, " ").trim()} ` }));
+
+function inferGroupColor(label = "") {
+  const words = String(label).toLowerCase().trim();
+  if (!words) return "";
+  const shade = resolveFindShade(words);
+  if (shade.ok) return words;
+  const padded = ` ${words.replace(/[^a-z]+/g, " ").trim()} `;
+  const nestedShade = hueDoCatalogPhrases.find(entry => padded.includes(entry.phrase));
+  if (nestedShade) return nestedShade.name;
+  const common = ["dark blue", "light blue", "navy blue", "lime green", "olive green", "sky blue",
+    "orange", "yellow", "green", "blue", "red", "pink", "purple", "brown", "black", "white", "gray", "grey", "teal", "cyan"];
+  return common.find((word) => new RegExp(`\\b${word.replace(/ /g, "\\s+")}\\b`, "i").test(words)) || "";
+}
+
+function drawHueDoGroupOverlay(frame, width, height) {
+  if (!hueDoMultiTrackers.length) return false;
+  const chips = [];
+  const verifiedPaths = [];
+  let visibleCount = 0;
+  let colorMatchCount = 0;
+  let firstObserved = null;
+  for (const item of hueDoMultiTrackers) {
+    const detection = item.tracker.update(frame);
+    if (!detection?.visible || !detection.bounds) continue;
+    visibleCount += 1;
+    const color = inferGroupColor(item.label);
+    const regions = color ? findHueDoColorRegions(frame, color, {
+      roiBounds: detection.bounds, whiteBalance: neutralGains
+    }) : [];
+    const match = regions.find((region) => region?.points?.length >= 4);
+    if (match) {
+      verifiedPaths.push(contourSplinePath(match.points));
+      colorMatchCount += 1;
+      firstObserved ??= { match, query: color };
+    } else {
+      // This is the object template, not proof of its label's color.
+      drawAreaBox(detection.bounds, "#f3d49a", "rgba(243,212,154,.025)");
+    }
+    const center = detection.center || { x: detection.bounds.x + detection.bounds.width / 2,
+      y: detection.bounds.y + detection.bounds.height / 2 };
+    chips.push({
+      key: `huedo-group-${chips.length}`,
+      label: `${match ? "COLOR REGION" : "POSSIBLE ITEM"} · ${item.label}${match?.broadMatch && match.observedShade ? ` (camera: ${match.observedShade})` : ""}`,
+      hex: match ? "#9be3c2" : "#f3d49a",
+      point: { x: center.x, y: Math.max(0, detection.bounds.y - 5) }
+    });
+  }
+  const paths = verifiedPaths.join(" ");
+  hueFindPath?.setAttribute("d", paths);
+  hueFindPathShadow?.setAttribute("d", paths);
+  hueDoHasVerifiedTarget = colorMatchCount > 0;
+  showHueDoObservedShade(firstObserved?.match, firstObserved?.query, { anchored: true });
+  setCameraChips(showColorChips ? chips : []);
+  setFeedback(taskResult, visibleCount
+    ? `Tracking ${visibleCount} of ${hueDoMultiTrackers.length} suggested items. ${colorMatchCount} color region(s) outlined. Labels and dotted boxes require visual confirmation before grouping.`
+    : "The grouped items are not currently tracked. Rebuild the guide with all items visible.");
+  return true;
 }
 
 function drawHueDoLiveOverlay() {
@@ -1725,44 +1827,72 @@ function drawHueDoLiveOverlay() {
     return;
   }
 
+  hueFindVectorOverlay?.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  if (isMultiObjectTask(activeTask) && drawHueDoGroupOverlay(frame, width, height)) return;
   const targetResult = hueDoTrackers.target.update(frame);
   const destinationResult = hueDoTrackers.destination.update(frame);
-  let target = targetResult?.visible ? { ...targetResult, source: "object" } : null;
+  const objectTarget = targetResult?.visible ? { ...targetResult, source: "object" } : null;
   const destination = destinationResult?.visible ? { ...destinationResult, source: "object" } : null;
 
-  // If semantic detection did not return a target box, a named task color can
-  // still provide a useful live outline. The label makes clear this is a color
-  // match, not proof that the region is the requested object.
-  if (!target && activeTask.color && !hueDoTrackers.target.template) {
-    const family = normalizeColorName(activeTask.color);
-    const regions = findSmoothColorContours(frame, {
-      color: family, minAreaFraction: .009, relativeMinArea: .22, maxRegions: 1
+  // A semantic Gemini/template bounding box identifies a likely object, not
+  // proof that every pixel inside it is the specified COLOR. For a color task,
+  // draw only the isolated, pixel-verified shade contour. Do not fall back to
+  // a whole-object rectangle when the requested shade is absent.
+  let target = null;
+  if (activeTask.color) {
+    // Gemini's boxes can drift or be absent. Use the tracked object ROI when
+    // available, but if it is lost allow a COLOR-ONLY candidate to be shown
+    // rather than silently drawing nothing. The label below distinguishes it.
+    let matches = findHueDoColorRegions(frame, activeTask.color, {
+      roiBounds: objectTarget?.bounds || null,
+      whiteBalance: neutralGains
     });
-    const stable = hueDoColorTracker.update(regions, width, height)[0];
-    if (stable) target = {
-      bounds: stable.bounds,
-      center: stable.center,
-      confidence: 0.66,
-      visible: true,
-      source: "color"
-    };
+    let anchoredToObject = Boolean(objectTarget && matches.length);
+    // A bounding box can miss the actual pen after camera motion. Recover a
+    // candidate from the wider frame, but NEVER label it as the verified pen.
+    if (!matches.length && objectTarget) {
+      matches = findHueDoColorRegions(frame, activeTask.color, { whiteBalance: neutralGains });
+      anchoredToObject = false;
+    }
+    if (matches.length) {
+      const stable = hueDoColorTracker.update(matches, width, height)[0];
+      if (stable) {
+        const closest = matches.slice().sort((a, b) => Math.hypot(a.center.x - stable.center.x, a.center.y - stable.center.y) -
+          Math.hypot(b.center.x - stable.center.x, b.center.y - stable.center.y))[0];
+        target = { ...stable, source: "color", visible: true, anchoredToObject,
+          observedShade: closest?.observedShade, broadMatch: closest?.broadMatch };
+      }
+    } else {
+      hueDoColorTracker.reset();
+    }
+  } else {
+    target = objectTarget;
   }
 
+  showHueDoObservedShade(target, activeTask.color, { anchored: Boolean(target?.anchoredToObject) });
+  hueDoHasVerifiedTarget = activeTask.color
+    ? isReliableHueDoOutline(target)
+    : Boolean(target?.visible && target.source === "object");
   const chips = [];
   let targetCenter = null;
   let destinationCenter = null;
   if (target) {
     targetCenter = target.center;
     const rect = target.bounds;
-    drawAreaBox(rect, target.source === "color" ? "#9be3c2" : "#f5df91", "rgba(245,223,145,.08)");
-    drawCircleAround(rect, target.source === "color" ? "#9be3c2" : "#f5df91");
+    if (target.source === "color") {
+      drawSmoothTargetContour(target.points);
+    } else {
+      drawAreaBox(rect, "#f5df91", "rgba(245,223,145,.08)");
+      drawCircleAround(rect, "#f5df91");
+    }
     chips.push({
       key: "huedo-live-target",
-      label: `${target.source === "color" ? "COLOR MATCH · " : "TARGET · "}${hueDoReferenceLabels.target || targetLabel()}`,
+      label: `${target.source === "color"
+        ? (target.anchoredToObject ? "COLOR MATCH · " : "POSSIBLE COLOR · ") : "TARGET · "}${target?.broadMatch && target.observedShade ? target.observedShade : (activeTask.color || hueDoReferenceLabels.target || targetLabel())}`,
       hex: target.source === "color" ? "#9be3c2" : "#f5df91",
       point: { x: targetCenter.x, y: Math.max(0, rect.y - 5) }
     });
-  } else if (hueDoTrackers.target.template) {
+  } else if (!activeTask.color && hueDoTrackers.target.template) {
     const last = targetResult?.bounds || hueDoTrackers.target.bounds;
     if (last) drawAreaBox(last, "#efb18e", "rgba(239,177,142,.04)");
   }
@@ -1791,9 +1921,9 @@ function drawHueDoLiveOverlay() {
     ? destination
       ? "Live tracking: follow the arrow from the target to the destination."
       : target.source === "color"
-        ? `Live color match for ${activeTask.color}. Check that the outlined area is the right object.`
+        ? `${target.anchoredToObject ? "Tracked" : "Possible"} ${activeTask.color} color match${target.broadMatch && target.observedShade ? ` (camera shade: ${target.observedShade})` : ""}. Confirm the outlined region is the requested ${activeTask.object || "object"}.`
         : `Live tracking ${hueDoReferenceLabels.target || targetLabel()}. Keep it in view as you move.`
-    : targetWasDetected
+    : targetWasDetected && !activeTask.color
       ? `Target not in view. Move the camera slowly to reacquire ${hueDoReferenceLabels.target || targetLabel()}.`
       : activeTask.color
         ? `Looking for a ${activeTask.color} area. Move the camera closer and check that the outline matches the object.`
@@ -1837,6 +1967,31 @@ function renderScene() {
 
   ctx.save();
   ctx.setTransform(k, 0, 0, k, 0, 0);
+  let photoColorRegions = [];
+  if (activeTask?.color) {
+    const targetLocation = sceneLocations.find(item => item.role === "target" && item.box);
+    samplingCanvas.width = width;
+    samplingCanvas.height = Math.round(height);
+    samplingContext.drawImage(scenePhoto.image, 0, 0, width, samplingCanvas.height);
+    photoColorRegions = findHueDoColorRegions(
+      samplingContext.getImageData(0, 0, width, samplingCanvas.height), activeTask.color, {
+        roiBounds: targetLocation ? {
+          x: targetLocation.box.x * width, y: targetLocation.box.y * height,
+          width: targetLocation.box.width * width, height: targetLocation.box.height * height
+        } : null,
+        whiteBalance: neutralGains
+      }).slice(0, 1);
+    if (photoColorRegions.length) showHueDoObservedShade(photoColorRegions[0], activeTask.color, { anchored: Boolean(targetLocation) });
+    if (photoColorRegions.length) {
+      const p = new Path2D(contourSplinePath(photoColorRegions[0].points));
+      ctx.strokeStyle = "rgba(8,16,13,.88)";
+      ctx.lineWidth = 4.5;
+      ctx.stroke(p);
+      ctx.strokeStyle = "#f5e6a1";
+      ctx.lineWidth = 2.4;
+      ctx.stroke(p);
+    }
+  }
   sceneLocations.forEach((location, index) => {
     const rect = {
       x: location.box.x * width,
@@ -1844,11 +1999,18 @@ function renderScene() {
       width: location.box.width * width,
       height: location.box.height * height
     };
-    const center = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    const center = location.role === "target" && activeTask?.color && photoColorRegions.length
+      ? photoColorRegions[0].center
+      : { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
     const done = Boolean(activeTask?.completed);
     if (location.role === "destination") {
       drawAreaBox(rect, done ? "#8fe0b0" : "#f4d78c", done ? "rgba(143,224,176,.18)" : "");
       destinationCenter ??= center;
+    } else if (location.role === "target" && activeTask?.color) {
+      // The model's region may include neighboring colors. Never draw it as
+      // a color outline; only the verified contour above is highlighted.
+      if (photoColorRegions.length) targetCenter ??= photoColorRegions[0].center;
+      else return;
     } else {
       drawCircleAround(rect, location.role === "target" ? "#f5e6a1" : "#b9e9cf");
       if (location.role === "target") targetCenter ??= center;
@@ -1860,6 +2022,11 @@ function renderScene() {
       point: { x: center.x * k, y: Math.max(0, rect.y - 6) * k }
     });
   });
+  if (!targetCenter && photoColorRegions.length) {
+    targetCenter = photoColorRegions[0].center;
+    chips.push({ key: "photo-color-match", label: `COLOR MATCH · ${photoColorRegions[0]?.broadMatch ? photoColorRegions[0].observedShade : activeTask.color}`,
+      hex: "#f5e6a1", point: { x: targetCenter.x * k, y: Math.max(0, targetCenter.y - 16) * k } });
+  }
   if (targetCenter && destinationCenter && currentStep()?.kind === "place" && !activeTask?.completed) {
     drawArrow(targetCenter, destinationCenter);
   }
@@ -1869,7 +2036,7 @@ function renderScene() {
 }
 
 snapshotBtn.addEventListener("click", async () => {
-  if (!streaming) return;
+  if (!streaming || currentMode !== "do") return;
   const scene = await captureCameraScene();
   if (!scene) return;
   setScenePhoto(scene);
@@ -1909,8 +2076,12 @@ function readDraftFields() {
 
 function refreshDraftPreview() {
   const draft = readDraftFields();
-  const sentence = describeTask(draft) || draft.summary || "";
-  const steps = buildGuideSteps({ ...draft, summary: sentence });
+  // Preserve Gemini's entire instruction and ordered plan. A single
+  // color/object/action/destination pair cannot express sorting or sequences.
+  const keepFullSentence = !draft.fieldsEdited && draft.summary &&
+    (draft.planSource === "gemini" || isMultiObjectTask(draft) || taskTypeOf(draft) === "sequence");
+  const sentence = keepFullSentence ? draft.summary : (describeTask(draft) || draft.summary || "");
+  const steps = buildGuideSteps({ ...draft, summary: sentence, planSource: draft.fieldsEdited ? "edited" : draft.planSource });
   taskReadback.textContent = sentence;
   taskAnswer.textContent = draft.answer || "";
   taskAnswer.hidden = !draft.answer;
@@ -1930,6 +2101,14 @@ function showDraft(draft, sourceNote) {
   taskActionInput.value = draft.action || "";
   taskDestinationInput.value = draft.destination || "";
   taskSourceNote.textContent = sourceNote;
+  const type = taskTypeOf(draft);
+  const simple = ["find", "identify", "inspect", "place"].includes(type);
+  // A complex task is represented by its full instruction and steps, not a
+  // misleading form with just one color/object/action/destination.
+  taskSimpleFields.hidden = !simple;
+  const groups = Array.isArray(draft.groups) ? draft.groups : [];
+  taskKindSummary.hidden = !draft.planSource && !groups.length;
+  taskKindSummary.textContent = `${type === "other" ? "Flexible" : type.charAt(0).toUpperCase() + type.slice(1)} guide${groups.length ? ` · ${groups.length} groups: ${groups.map((g) => `${g.name}${Number(g.count)>0 ? ` (${g.count})` : ""}`).join(", ")}` : ""}. Review the steps below.${!simple ? " To change the instruction, edit it above and build a new guide." : ""}`;
   parsedTask.hidden = false;
   sceneLocations = draft.locations || [];
   renderScene();
@@ -1938,7 +2117,11 @@ function showDraft(draft, sourceNote) {
 }
 
 [taskColorInput, taskObjectInput, taskActionInput, taskDestinationInput].forEach((field) => {
-  field.addEventListener("input", refreshDraftPreview);
+  field.addEventListener("input", () => {
+    // Edited fields should never be presented as if Gemini verified the change.
+    if (pendingTaskDraft) pendingTaskDraft.fieldsEdited = true;
+    refreshDraftPreview();
+  });
 });
 
 readTaskBtn.addEventListener("click", () => {
@@ -1959,13 +2142,8 @@ interpretBtn.addEventListener("click", async () => {
     showInterpretError("Type what you need, for example: Where is the pink pen?");
     return;
   }
-  if (!streaming && !scenePhoto) {
-    showInterpretError("Start the webcam or upload a picture to build a visual guide.");
-    return;
-  }
-
   interpretBtn.disabled = true;
-  interpretBtn.textContent = streaming ? "Reading live camera…" : "Looking at the picture…";
+  interpretBtn.textContent = streaming ? "Reading live camera…" : scenePhoto ? "Looking at the picture…" : "Planning instructions…";
   setFeedback(interpretStatus, "");
   setActiveMode("do");
 
@@ -1973,17 +2151,22 @@ interpretBtn.addEventListener("click", async () => {
     // Use the current webcam frame as the semantic reference when the camera is live.
     // The returned target/destination boxes seed the local, continuous tracker.
     const referenceScene = streaming ? await captureCameraScene() : scenePhoto;
-    if (!referenceScene) throw new Error("The camera frame is not ready yet. Wait a moment and try again.");
+    if (streaming && !referenceScene) throw new Error("The camera frame is not ready yet. Wait a moment and try again.");
     if (streaming) setScenePhoto(referenceScene);
-    const result = await interpret(text, { mimeType: referenceScene.mimeType, data: referenceScene.data });
+    const result = await interpret(text, referenceScene
+      ? { mimeType: referenceScene.mimeType, data: referenceScene.data } : null);
     const basic = parseInstruction(text);
     const target = describeTarget({ color: result.targetColor || basic.color, object: result.targetObject || basic.object });
     const foundTarget = (result.locations || []).some((location) => location.role === "target");
-    const missingNote = result.locateBusy
-      ? `Gemini was too busy to circle the ${target} just now. Press Build visual guide again in a few seconds.`
-      : `I couldn't find the ${target} in this picture. Try another picture.`;
+    const missingNote = !referenceScene ? "Add a picture or start the camera to locate objects visually."
+      : result.locateBusy ? "Gemini could not locate every requested item just now; try again."
+      : "Some requested objects were not located. Try a clearer picture and confirm the suggested regions.";
     showDraft({
       summary: result.summary || text,
+      planSource: result.planSource || "gemini",
+      planSteps: Array.isArray(result.planSteps) ? result.planSteps : [],
+      taskType: result.taskType || "other",
+      completionHint: result.completionHint || "",
       steps: Array.isArray(result.steps) ? result.steps : [],
       visualCues: Array.isArray(result.visualCues) ? result.visualCues : [],
       color: result.targetColor || basic.color || "",
@@ -1991,22 +2174,21 @@ interpretBtn.addEventListener("click", async () => {
       action: result.action || basic.action || "",
       destination: result.destination || basic.destination || "",
       relation: result.relation || basic.relation || "",
-      answer: [result.answer, target && !foundTarget ? missingNote : ""].filter(Boolean).join(" "),
+      answer: [result.answer, !foundTarget && referenceScene && target && !isMultiObjectTask({ taskType: result.taskType }) ? missingNote : "",
+        !referenceScene ? "No photo provided: visual locations are not verified yet." : ""].filter(Boolean).join(" "),
       locations: result.locations || [],
       groups: Array.isArray(result.groups) ? result.groups : []
-    }, "Read by Gemini. Fix anything that's wrong, then start.");
+    }, "Gemini's proposed plan. Review every step and any suggested item locations before starting.");
     setFeedback(interpretStatus, "Check the details below.");
   } catch (error) {
-    const basic = parseInstruction(text);
-    const target = describeTarget(basic);
-    showDraft({
-      ...basic,
-      steps: [],
-      visualCues: [],
-      locations: [],
-      answer: target ? `Nothing is circled because Gemini didn't answer: ${error.message}` : ""
-    }, `Gemini didn't answer (${error.message}), so I used a basic reading and couldn't look at the picture.`);
-    setFeedback(interpretStatus, `Gemini: ${error.message}`);
+    // Fail closed: the offline one-object parser cannot safely reconstruct a
+    // multi-step color-dependent task. Never offer its invented guide as valid.
+    pendingTaskDraft = null;
+    parsedTask.hidden = true;
+    sceneLocations = [];
+    renderScene();
+    const reason = String(error?.message || "Gemini is temporarily unavailable.");
+    showInterpretError(`Couldn't build this guide: ${reason} Your instruction is still here. Check the Gemini configuration and press Build visual guide to retry.`);
   } finally {
     interpretBtn.disabled = false;
     interpretBtn.textContent = "Build visual guide";
@@ -2021,7 +2203,14 @@ saveTaskBtn.addEventListener("click", async () => {
   }
 
   const { locations = [], answer = "", ...rest } = draft;
-  const task = { ...rest, summary: sentence, steps: steps.map((step) => step.text) };
+  const task = {
+    ...rest,
+    summary: sentence,
+    steps: steps.map((step) => step.text),
+    planSteps: steps,
+    planSource: draft.fieldsEdited ? "edited" : draft.planSource,
+    taskType: taskTypeOf(draft)
+  };
 
   saveTaskBtn.disabled = true;
   saveTaskBtn.textContent = "Starting…";
@@ -2041,7 +2230,10 @@ saveTaskBtn.addEventListener("click", async () => {
 
   parsedTask.hidden = true;
   setFeedback(interpretStatus, `Guide started.${saveNote}`);
-  setActiveTask({ ...saved, groups: task.groups || [], answer, locations }, { prefix: `Starting: ${sentence}` });
+  setActiveTask({ ...task, ...saved, planSteps: task.planSteps,
+    planSource: task.planSource, taskType: task.taskType,
+    completionHint: task.completionHint || "", groups: task.groups || [], answer, locations },
+    { prefix: `Starting: ${sentence}` });
   setActiveMode("do");
 });
 
@@ -2059,10 +2251,13 @@ function destinationLabel() {
 }
 
 function setActiveTask(task, { prefix = "" } = {}) {
-  const summary = task.summary || describeTask(task) || "Follow the saved task.";
+  const summary = cleanTaskSummary(task) || "Follow the saved task.";
   const guideSteps = buildGuideSteps({ ...task, summary });
 
   activeTask = { ...task, summary, guideSteps, answer: task.answer || "" };
+  hueDoCheckReference = scenePhoto?.data ? { mimeType: scenePhoto.mimeType, data: scenePhoto.data } : null;
+  showHueDoCheckFeedback(null);
+  showHueDoObservedShade(null, "");
   sceneLocations = Array.isArray(task.locations) ? task.locations : [];
   seedHueDoTrackers();
   if (task.sceneImage?.mimeType === "image/jpeg" && typeof task.sceneImage.data === "string" &&
@@ -2074,6 +2269,7 @@ function setActiveTask(task, { prefix = "" } = {}) {
       if (activeTask?._id !== task._id) return;
       scenePhoto = { image, data: originalImage.data, dataUrl: image.src,
         mimeType: originalImage.mimeType, width: image.naturalWidth, height: image.naturalHeight, origin: "saved", name: "Saved guide photo" };
+      hueDoCheckReference = { mimeType: originalImage.mimeType, data: originalImage.data };
       instructionImagePreview.replaceChildren();
       const thumb = document.createElement("img"); thumb.src = image.src; thumb.alt = "Photo used for this saved guide";
       instructionImagePreview.append(thumb); instructionImagePreview.hidden = false;
@@ -2126,18 +2322,31 @@ function renderGuideSteps() {
 }
 
 function stepStatusText(step) {
+  if (isMultiObjectTask(activeTask)) {
+    if (step.kind === "place") return "Check with a new picture once all requested groups or matches are arranged. Gemini will assess the complete task, not just one object.";
+    if (!streaming && !scenePhoto) return "Start the camera or upload a picture to identify the items and their groups.";
+    if (step.kind === "find") return `Look for all the items and confirm each suggested group label; ${sceneLocations.filter((x) => x.role === "target").length} item(s) located in the starting image.`;
+    return "Follow the group labels and requested instructions. Press Next when ready.";
+  }
   if (step.kind === "find") {
-    if (streaming) return `Live camera guide: look for the circle and outline around ${targetLabel()}. Markers update as you move the camera.`;
+    if (streaming) return hueDoHasVerifiedTarget
+      ? (activeTask.color
+        ? `A ${activeTask.color} color region is outlined. Confirm it is the ${activeTask.object || "requested object"} before continuing.`
+        : `A possible ${targetLabel()} is marked. Confirm it visually before continuing.`)
+      : `No confirmed ${activeTask.color || targetLabel()} outline yet. Move the camera closer, improve lighting, or try another picture.`;
     if (!scenePhoto) return "Start the camera or upload a picture to build a visual guide.";
     const found = sceneLocations.some((location) => location.role === "target");
     if (!found && activeTask.color) return `No object box was returned. Start the camera to look for a live ${activeTask.color} match.`;
     const isAre = isPlural(activeTask.object) ? "are" : "is";
-    return activeTask.answer || (found ? `The ${targetLabel()} ${isAre} circled.` : `I couldn't find the ${targetLabel()} in this picture.`);
+    return activeTask.color
+      ? `Color outlines appear only for matching pixels. ${found ? "Check the highlighted region in the picture." : "No reliable target region was located; try a clearer photo."}`
+      : (found ? `A possible ${targetLabel()} location was marked. Confirm it visually.` : `I couldn't find the ${targetLabel()} in this picture.`);
   }
   if (step.kind === "place") {
+    if (!activeTask.destination) return "When the requested action is finished, press Check with a new picture. Gemini will assess what is visible and explain any uncertainty.";
     return streaming
-      ? `Move the outlined target toward the destination marker. The arrow updates live; press "Check with a new picture" when it's done.`
-      : `Start the camera to see live target and destination markers, then press "Check with a new picture" when it's done.`;
+      ? `Follow the target and destination markers; press "Check with a new picture" to review the result.`
+      : `Start the camera to see target and destination markers, then press "Check with a new picture" to review the result.`;
   }
   return "Press Next when you're ready.";
 }
@@ -2145,7 +2354,9 @@ function stepStatusText(step) {
 function goToStep(index, { prefix = "", announce = true } = {}) {
   if (!activeTask) return;
   const steps = activeTask.guideSteps;
+  const previousIndex = guideStepIndex;
   guideStepIndex = clamp(index, 0, steps.length - 1);
+  if (previousIndex !== guideStepIndex) showHueDoCheckFeedback(null);
   const step = steps[guideStepIndex];
 
   const targetMissing = step.kind === "find" && !sceneLocations.some((location) => location.role === "target") && !activeTask.color;
@@ -2185,30 +2396,37 @@ checkPictureBtn.addEventListener("click", async () => {
   }
 
   checkPictureBtn.disabled = true;
+  showHueDoCheckFeedback(null);
   checkPictureBtn.textContent = "Checking…";
   try {
+    const before = hueDoCheckReference;
     const scene = await captureCameraScene();
-    setScenePhoto(scene);
     speak("Checking.");
     const result = await checkTask({ mimeType: scene.mimeType, data: scene.data }, {
       summary: activeTask.summary,
+      taskType: taskTypeOf(activeTask),
+      groups: activeTask.groups || [],
+      completionHint: activeTask.completionHint || "",
       target: targetLabel(),
       destination: activeTask.destination || ""
-    });
+    }, before);
+    setScenePhoto(scene);
     sceneLocations = result.locations || [];
     seedHueDoTrackers();
     if (result.done) {
+      showHueDoCheckFeedback(null);
       completeActiveTask(true, result.message);
     } else {
       renderScene();
-      const message = result.message || (isSortTask(activeTask) || !activeTask.destination
-        ? "Not done yet. Fix it, then check again."
-        : `Not done yet. Put the ${targetLabel()} ${normalizeRelation(activeTask.relation)} ${destinationLabel()}, then check again.`);
+      const outcome = ["incorrect", "incomplete", "uncertain"].includes(result.outcome) ? result.outcome : "uncertain";
+      const message = result.message || "The result cannot be verified yet. Show all relevant objects and try again.";
+      showHueDoCheckFeedback({ ...result, outcome, message });
       setFeedback(taskResult, message);
-      speak(message);
+      speak(outcome === "uncertain" ? `Couldn't verify the task. ${message}` : `Task not complete. ${message}`);
     }
   } catch (error) {
-    const message = `I couldn't check automatically (${error.message}). Press Done when it's finished.`;
+    const message = `Picture check failed: ${error.message}. No completion was verified. Try a new picture.`;
+    showHueDoCheckFeedback({ outcome: "uncertain", message });
     setFeedback(taskResult, message);
     speak(message);
   } finally {
@@ -2268,11 +2486,12 @@ function playChime() {
 function showCompletion(verified, detail = "", announce = true) {
   activeTask.completed = true;
   checkPictureBtn.hidden = true;
+  showHueDoCheckFeedback(null);
   guideStepCard.hidden = true;
   guideDone.hidden = false;
   const message = verified
     ? `Done! ${detail || `The ${targetLabel()} is ${normalizeRelation(activeTask.relation)} ${destinationLabel()}.`}`
-    : "Done! Task marked complete.";
+    : "Task marked complete manually (not visually verified).";
   guideDoneText.textContent = message;
   taskStateMark.textContent = "✓";
   taskStateMark.style.color = "var(--success)";
@@ -2306,6 +2525,9 @@ async function completeActiveTask(verified = false, detail = "") {
 
 function clearActiveTask() {
   activeTask = null;
+  hueDoCheckReference = null;
+  showHueDoCheckFeedback(null);
+  showHueDoObservedShade(null, "");
   sceneLocations = [];
   resetHueDoTracking();
   taskCompletionPending = false;

@@ -53,6 +53,12 @@ app.get("/exit-demo", (req, res) => {
 });
 app.get("/login.css", (req, res) => res.sendFile(path.join(publicDir, "login.css")));
 app.get("/login.js", (req, res) => res.sendFile(path.join(publicDir, "login.js")));
+// Login preview and brand assets must be available before authentication.
+// Other application assets remain protected by the auth/demo gate below.
+for (const filename of ["brand-logo.css", "login-preview.css", "login-preview.js"]) {
+  app.get(`/${filename}`, (req, res) => res.sendFile(path.join(publicDir, filename)));
+}
+app.use("/images", express.static(path.join(publicDir, "images"), { index: false }));
 app.get("/", (req, res) => res.redirect(req.user ? "/app" : "/login"));
 app.get("/app", (req, res) => req.user || req.demo ? res.sendFile(path.join(publicDir, "index.html")) : res.redirect("/login"));
 
@@ -91,4 +97,4 @@ try {
   console.error("MongoDB connection failed. The login page remains available:", error.message);
 }
 
-app.listen(PORT, () => console.log(`WhatColorAreHue running at http://localhost:${PORT}`));
+app.listen(PORT, () => console.log(`WhatColorAreHue? running at http://localhost:${PORT}`));

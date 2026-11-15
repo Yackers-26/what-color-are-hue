@@ -122,8 +122,6 @@ body {
   .sample-indicator, .sample-reticle, .sample-swatch, .color-preview { transition: none !important; }
 }
 
-body.high-contrast .sample-indicator { background: #000; border: 2px solid white; }
-body.high-contrast .sample-reticle { box-shadow: 0 0 0 3px black, 0 0 0 6px white; }
 
 /* Larger, more legible HueSee readouts than the original compact dashboard. */
 #huesee .selected-label { font-size: 10px; }

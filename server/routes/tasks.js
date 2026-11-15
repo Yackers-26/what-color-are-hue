@@ -32,6 +32,16 @@ function cleanImage(image) {
 function cleanSteps(steps) {
   return Array.isArray(steps) ? steps.slice(0, 12).map((step) => cleanString(step, 350)) : [];
 }
+function cleanStepPlan(plan) {
+  return Array.isArray(plan) ? plan.slice(0, 12).flatMap((step) => {
+    if (!step || typeof step !== "object") return [];
+    const text = cleanString(step.text, 350);
+    if (!text) return [];
+    const kind = cleanString(step.kind, 20).toLowerCase();
+    return [{ text, kind: ["find", "manual", "place"].includes(kind) ? kind : "manual" }];
+  }) : [];
+}
+
 function cleanVisualCues(cues) {
   return Array.isArray(cues) ? cues.slice(0, 12).map((cue) => ({
     label: cleanString(cue?.label, 90), role: cleanString(cue?.role, 24),
@@ -53,7 +63,10 @@ router.post("/", async (req, res) => {
   const sceneImage = cleanImage(body.sceneImage);
   if (sceneImage === undefined) return res.status(400).json({ error: "Saved guide photo must be a JPEG under 6MB." });
   const task = {
-    summary, steps: cleanSteps(body.steps), visualCues: cleanVisualCues(body.visualCues),
+    summary, steps: cleanSteps(body.steps), planSteps: cleanStepPlan(body.planSteps),
+    planSource: cleanString(body.planSource, 20), taskType: cleanString(body.taskType, 24),
+    completionHint: cleanString(body.completionHint, 350),
+    visualCues: cleanVisualCues(body.visualCues),
     color: cleanString(body.color, 60), object: cleanString(body.object, 80),
     action: cleanString(body.action, 80), destination: cleanString(body.destination, 100),
     relation: cleanString(body.relation, 80), answer: cleanString(body.answer, 800),
@@ -81,18 +94,18 @@ router.get("/", async (req, res) => {
 router.patch("/:id", async (req, res) => {
   if (!ObjectId.isValid(req.params.id)) return res.status(400).json({ error: "Invalid task id" });
   const body = req.body ?? {};
-  const fields = ["summary", "steps", "visualCues", "color", "object", "action", "destination", "relation", "answer", "groups", "locations", "completed"];
+  const fields = ["summary", "steps", "planSteps", "planSource", "taskType", "completionHint", "visualCues", "color", "object", "action", "destination", "relation", "answer", "groups", "locations", "completed"];
   const updates = {};
   for (const field of fields) {
     if (body[field] === undefined) continue;
     if (field === "completed") {
       if (typeof body.completed !== "boolean") return res.status(400).json({ error: "completed must be a boolean" });
       updates.completed = body.completed;
-    } else if (["steps", "visualCues", "groups", "locations"].includes(field)) {
+    } else if (["steps", "planSteps", "visualCues", "groups", "locations"].includes(field)) {
       if (!Array.isArray(body[field])) return res.status(400).json({ error: `${field} must be a list` });
-      updates[field] = ({ steps: cleanSteps, visualCues: cleanVisualCues, groups: cleanGroups, locations: cleanLocations })[field](body[field]);
+      updates[field] = ({ steps: cleanSteps, planSteps: cleanStepPlan, visualCues: cleanVisualCues, groups: cleanGroups, locations: cleanLocations })[field](body[field]);
     } else {
-      updates[field] = cleanString(body[field], { summary: 500, color: 60, object: 80, action: 80, destination: 100, relation: 80, answer: 800 }[field]);
+      updates[field] = cleanString(body[field], { summary: 500, planSource: 20, taskType: 24, completionHint: 350, color: 60, object: 80, action: 80, destination: 100, relation: 80, answer: 800 }[field]);
     }
   }
   if (!Object.keys(updates).length) return res.status(400).json({ error: "No task changes supplied" });

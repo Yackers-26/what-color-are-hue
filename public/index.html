@@ -1,11 +1,9 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"><meta name="theme-color" content="#f7f4ec"><meta name="description" content="WhatColorAreHue color camera workspace"><title>WhatColorAreHue | Color workspace</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/huesee-polish.css"><link rel="stylesheet" href="/f1-editorial.css"><link rel="stylesheet" href="/workbench.css"><link rel="stylesheet" href="/hue-upgrades.css"></head><body><a class="skip-link" href="#workspace">Skip to camera workspace</a><header class="site-header">
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"><meta name="theme-color" content="#f7f4ec"><meta name="description" content="WhatColorAreHue? color camera workspace"><title>WhatColorAreHue? | Color workspace</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/huesee-polish.css"><link rel="stylesheet" href="/f1-editorial.css"><link rel="stylesheet" href="/workbench.css"><link rel="stylesheet" href="/hue-upgrades.css"><link rel="stylesheet" href="/brand-logo.css"><link rel="icon" href="/images/favicon.png" type="image/png"></head><body><a class="skip-link" href="#workspace">Skip to camera workspace</a><header class="site-header">
   <div class="f1-wrap f1-header-inner">
-    <a class="brand f1-wordmark" href="/" aria-label="WhatColorAreHue">whatcolorarehue<span class="f1-dot">.</span></a>
+    <a class="brand f1-wordmark" href="/" aria-label="WhatColorAreHue?"><img class="brand-logo" src="/images/whatcolorarehue-logo.png" alt="" width="38" height="38" />WhatColorAreHue?</a>
     <div class="header-actions" aria-label="Accessibility preferences">
       <button id="themeToggle" class="utility-button" type="button" aria-pressed="false" aria-label="Turn dark mode on"><span aria-hidden="true">☾</span> <span>Dark mode</span></button>
-      <button id="contrastToggle" class="utility-button" type="button" aria-pressed="false" aria-label="Toggle high contrast">◐ <span>Contrast</span></button>
       <button id="soundToggle" class="utility-button" type="button" aria-pressed="true" aria-label="Turn sound off"><span aria-hidden="true">🔊</span> <span>Sound on</span></button>
-      <button id="textSizeToggle" class="utility-button" type="button" aria-pressed="false" aria-label="Toggle larger text">A+ <span>Text</span></button>
       <span class="account-divider" aria-hidden="true"></span>
       <span class="account-name" id="accountName" aria-label="Signed in account">Account</span>
       <button id="signOutBtn" class="utility-button signout-button" type="button">Sign out</button>
@@ -30,7 +28,7 @@
 <span aria-hidden="true" class="camera-label-toggle-icon">▦</span>
 <span id="colorChipToggleText">Hide color labels</span>
 </button>
-<button id="snapshotBtn" class="button camera-button" type="button" disabled aria-label="Take a picture for HueDo">Take picture</button>
+<button id="snapshotBtn" class="button camera-button" type="button" hidden disabled aria-label="Take a picture for HueDo">Take picture</button>
 <button aria-pressed="false" class="button camera-button" id="toggleCamBtn" type="button">
 <span aria-hidden="true" class="camera-glyph"></span>
 <span id="toggleCamLabel">Start camera</span>
@@ -145,14 +143,14 @@
 
           <div class="feature-card interpreter-card">
             <label class="field-label" for="instructionInput">What do you need to do?</label>
-            <textarea id="instructionInput" rows="3" placeholder="e.g. Where is the pink pen?"></textarea>
+            <textarea id="instructionInput" rows="3" placeholder="e.g. Sort the pens by color, or match each lid to its container"></textarea>
             <div class="upload-row">
               <label class="file-button" for="instructionImageInput">＋ Upload picture</label>
               <input id="instructionImageInput" type="file" accept="image/*">
               <span id="instructionFileName" class="file-name">No picture yet</span>
               <button id="clearSceneBtn" class="text-button" type="button" hidden>Clear picture</button>
             </div>
-            <p class="panel-hint">With the webcam on, Build visual guide analyzes the current frame and follows detected objects live with circles, outlines, and arrows. You can also upload a reference picture.</p>
+            <p class="panel-hint">Describe any color-dependent task: sort, group, match, compare, identify, or follow several steps. Gemini creates instructions; the camera offers visual suggestions when objects are visible. Uploading a picture is optional.</p>
             <div id="instructionImagePreview" class="instruction-image-preview" hidden></div>
             <button id="interpretBtn" class="button button-primary full-button" type="button">Build visual guide</button>
             <p id="interpretStatus" class="inline-status" role="status" aria-live="polite"></p>
@@ -160,9 +158,10 @@
             <div id="parsedTask" class="parsed-task" hidden>
               <div class="parsed-heading"><h2>Did I get this right?</h2><span class="confirm-mark" aria-hidden="true">?</span></div>
               <p id="taskSourceNote" class="task-source-note"></p>
+              <p id="taskKindSummary" class="task-kind-summary" hidden></p>
               <p id="taskReadback" class="task-readback" aria-live="polite"></p>
               <p id="taskAnswer" class="task-answer" hidden></p>
-              <div class="parsed-fields">
+              <div class="parsed-fields" id="taskSimpleFields">
                 <div class="field-group">
                   <label for="taskColorInput">Color</label>
                   <input id="taskColorInput" type="text" placeholder="pink">
@@ -199,7 +198,9 @@
               <div id="guideStepCard" class="guide-step-card">
                 <p id="guideStepCount" class="guide-step-count">Step 1 of 1</p>
                 <p id="guideStepText" class="guide-step-text"></p>
+                <p id="hueDoShadeHint" class="huedo-shade-hint" role="status" aria-live="polite" hidden></p>
                 <button id="checkPictureBtn" class="button button-secondary full-button check-picture-button" type="button" hidden>📷 Check with a new picture</button>
+                <div id="hueDoCheckFeedback" class="huedo-check-feedback" role="alert" aria-live="assertive" hidden></div>
               </div>
               <div id="guideDone" class="guide-done" hidden>
                 <span class="guide-done-symbol" aria-hidden="true">✓</span>

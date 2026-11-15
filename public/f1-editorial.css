@@ -207,5 +207,3 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
   .f1-shape,.f1-pill,.f1-outline,.f1-reveal { animation: none !important; transition: none !important; transform: none !important; }
   .js .f1-reveal:not(.is-shown) { opacity: 1; transform: none; }
 }
-body.high-contrast .f1-hero h1 em,body.high-contrast .f1-section-heading em,body.high-contrast .f1-memory h2 em { color: inherit; text-decoration: underline; }
-body.high-contrast .f1-poster { outline: 2px solid currentColor; }

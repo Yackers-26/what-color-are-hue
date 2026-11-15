@@ -4,29 +4,109 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#f7f4ec" />
-  <title>Sign in · WhatColorAreHue</title>
+  <title>Sign in · WhatColorAreHue?</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/login.css" />
+  <link rel="stylesheet" href="/brand-logo.css" />
+  <link rel="stylesheet" href="/login-preview.css" />
+  <link rel="icon" href="/images/favicon.png" type="image/png" />
+  <script src="/login-preview.js" defer></script>
   <script src="/login.js" type="module"></script>
 </head>
 <body>
   <a class="skip" href="#auth-form">Skip to sign-in</a>
   <header class="auth-header">
-    <a class="wordmark" href="/login" aria-label="WhatColorAreHue home">whatcolorarehue<span>.</span></a>
+    <a class="wordmark" href="/login" aria-label="WhatColorAreHue? home"><img class="brand-logo" src="/images/whatcolorarehue-logo.png" alt="" width="38" height="38" />WhatColorAreHue?</a>
     <button id="authThemeToggle" class="auth-theme-toggle" type="button" aria-pressed="false" aria-label="Turn dark mode on">☾</button>
   </header>
   <main class="auth-layout">
-    <section class="art-panel" aria-label="Color study illustration">
-      <div class="composition" aria-hidden="true">
-        <div class="shape shape-one"></div>
-        <div class="shape shape-two"></div>
-        <div class="shape shape-three"></div>
-        <div class="shape shape-four"></div>
-        <div class="focus-ring"></div>
+    <section class="art-panel live-art-panel" aria-label="Preview of WhatColorAreHue? features">
+      <div class="live-preview" id="loginFeaturePreview">
+        <div class="preview-heading">
+          <span class="preview-heading-label">A LOOK INSIDE</span>
+          <span class="preview-heading-note"><span class="preview-light" aria-hidden="true"></span> Interactive preview</span>
+        </div>
+        <div class="preview-stage">
+          <article class="preview-scene is-active" data-preview-scene="see" aria-hidden="false">
+            <div class="preview-screen">
+              <div class="preview-camera">
+                <img class="preview-photo preview-photo-see" src="/images/preview-huesee.webp" alt="" draggable="false" />
+                <span class="preview-camera-tag">Color sample</span>
+                <div class="preview-sample-chip"><span class="preview-color-dot" style="--chip:#6B8F3E"></span><span id="previewSampleChipName">Olive green</span></div>
+              </div>
+              <div class="preview-details">
+                <span class="preview-kicker">HUESEE</span>
+                <h2>Your color, up close.</h2>
+                <div class="preview-shade-reading">
+                  <span class="preview-swatch" style="--swatch:#6B8F3E"></span>
+                  <span class="preview-reading-copy"><small>IDENTIFIED AS</small><strong>Olive green</strong><em>Soft, earthy green</em></span>
+                </div>
+                <dl class="preview-data"><div><dt>HEX</dt><dd>#6B8F3E</dd></div><div><dt>RGB</dt><dd>107, 143, 62</dd></div></dl>
+                <div class="preview-mini-buttons"><span>Speak color</span><span>Pin reading</span></div>
+              </div>
+            </div>
+          </article>
+          <article class="preview-scene" data-preview-scene="find" aria-hidden="true">
+            <div class="preview-screen">
+              <div class="preview-camera preview-find-camera">
+                <img class="preview-photo" src="/images/preview-huefind.webp" alt="" draggable="false" />
+                <span class="preview-camera-tag">Find in view</span>
+                <span class="preview-find-hit">Lavender · Match found</span>
+              </div>
+              <div class="preview-details">
+                <span class="preview-kicker">HUEFIND</span>
+                <h2>Find a specific shade.</h2>
+                <p class="preview-field-label">Target shade</p>
+                <div class="preview-search"><span aria-hidden="true">⌕</span><span id="previewFindQuery">&nbsp;</span><span class="preview-caret" aria-hidden="true"></span></div>
+                <div class="preview-result"><span class="preview-swatch" style="--swatch:#B99BCE"></span><span><strong>Lavender</strong><small>Soft, cool purple</small></span></div>
+                <p class="preview-match-state" id="previewFindStatus">Looking for a match...</p>
+              </div>
+            </div>
+          </article>
+          <article class="preview-scene" data-preview-scene="do" aria-hidden="true">
+            <div class="preview-screen">
+              <div class="preview-camera">
+                <img class="preview-photo" src="/images/preview-huedo.webp" alt="" draggable="false" />
+                <span class="preview-camera-tag">Guided task</span>
+                <span class="preview-do-target">Yellow pencil</span>
+              </div>
+              <div class="preview-details">
+                <span class="preview-kicker">HUEDO</span>
+                <h2>Follow the color task.</h2>
+                <p class="preview-step-counter" id="previewDoCounter">STEP 1 OF 3</p>
+                <div class="preview-step-track"><span id="previewDoFill"></span></div>
+                <div class="preview-step-card"><span class="preview-step-index" id="previewDoIndex">1</span><strong id="previewDoTask">Pick up the yellow pencil.</strong></div>
+                <p class="preview-step-help" id="previewDoHint">Look for the bright yellow pencil on the desk.</p>
+              </div>
+            </div>
+          </article>
+          <article class="preview-scene" data-preview-scene="memory" aria-hidden="true">
+            <div class="preview-memory-screen">
+              <div class="preview-memory-head"><span class="preview-kicker">HUEMEMORY</span><h2>Your saved colors.</h2><p>Keep the shades you want to revisit.</p></div>
+              <div class="preview-memory-section-label">PINNED COLORS</div>
+              <div class="preview-memory-swatches">
+                <div class="preview-memory-swatch"><span style="--swatch:#6B8F3E"></span><strong>Olive green</strong><small>#6B8F3E</small></div>
+                <div class="preview-memory-swatch"><span style="--swatch:#B99BCE"></span><strong>Lavender</strong><small>#B99BCE</small></div>
+                <div class="preview-memory-swatch"><span style="--swatch:#D4A72C"></span><strong>Mustard</strong><small>#D4A72C</small></div>
+              </div>
+              <div class="preview-memory-section-label">RECENT READINGS</div>
+              <div class="preview-memory-history">
+                <div class="preview-memory-entry"><i style="--swatch:#87B7E6"></i><span>Sky blue</span><small>#87B7E6</small></div>
+                <div class="preview-memory-entry"><i style="--swatch:#7A1F2B"></i><span>Burgundy</span><small>#7A1F2B</small></div>
+              </div>
+            </div>
+          </article>
+        </div>
+        <div class="preview-controls" role="group" aria-label="Choose a feature to preview">
+          <button class="preview-mode is-active" type="button" data-preview-tab="see" aria-pressed="true">HueSee</button>
+          <button class="preview-mode" type="button" data-preview-tab="find" aria-pressed="false">HueFind</button>
+          <button class="preview-mode" type="button" data-preview-tab="do" aria-pressed="false">HueDo</button>
+          <button class="preview-mode" type="button" data-preview-tab="memory" aria-pressed="false">HueMemory</button>
+        </div>
+        <div class="preview-footer"><span id="previewCaption">01 / 04 · IDENTIFY COLORS</span><span>Illustrative demo</span></div>
       </div>
-      <div class="art-footer"><span>HueSee / HueFind / HueDo / HueMemory</span><span>2026</span></div>
     </section>
     <section class="auth-panel" aria-labelledby="auth-title">
       <div class="auth-content">
@@ -56,6 +136,6 @@
       </div>
     </section>
   </main>
-  <footer class="auth-footer"><span>WHATCOLORAREHUE · HueSee / HueFind / HueDo / HueMemory</span></footer>
+  <footer class="auth-footer"><span>WhatColorAreHue? · HueSee / HueFind / HueDo / HueMemory</span></footer>
 </body>
 </html>
