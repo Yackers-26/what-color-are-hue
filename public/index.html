@@ -1,186 +1,193 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="theme-color" content="#111916">
-  <meta name="description" content="An accessible camera workspace for identifying colors, finding objects, and completing color-based activities.">
-  <title>WhatColorAreHue</title>
-  <link rel="stylesheet" href="/style.css">
-</head>
-<body>
-  <a class="skip-link" href="#workspace">Skip to workspace</a>
-
-  <header class="site-header">
-    <a class="brand" href="#workspace" aria-label="WhatColorAreHue home">
-      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-      <span>WhatColorAreHue</span>
-    </a>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"><meta name="theme-color" content="#f7f4ec"><meta name="description" content="WhatColorAreHue color camera workspace"><title>WhatColorAreHue | Color workspace</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet"><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/huesee-polish.css"><link rel="stylesheet" href="/f1-editorial.css"><link rel="stylesheet" href="/workbench.css"><link rel="stylesheet" href="/hue-upgrades.css"></head><body><a class="skip-link" href="#workspace">Skip to camera workspace</a><header class="site-header">
+  <div class="f1-wrap f1-header-inner">
+    <a class="brand f1-wordmark" href="/" aria-label="WhatColorAreHue">whatcolorarehue<span class="f1-dot">.</span></a>
     <div class="header-actions" aria-label="Accessibility preferences">
-      <button id="contrastToggle" class="utility-button" type="button" aria-pressed="false" aria-label="Toggle high contrast">
-        <span aria-hidden="true">◐</span><span>High contrast</span>
-      </button>
-      <button id="textSizeToggle" class="utility-button" type="button" aria-pressed="false" aria-label="Toggle larger text">
-        <span aria-hidden="true">A+</span><span>Text</span>
-      </button>
+      <button id="themeToggle" class="utility-button" type="button" aria-pressed="false" aria-label="Turn dark mode on"><span aria-hidden="true">☾</span> <span>Dark mode</span></button>
+      <button id="contrastToggle" class="utility-button" type="button" aria-pressed="false" aria-label="Toggle high contrast">◐ <span>Contrast</span></button>
+      <button id="soundToggle" class="utility-button" type="button" aria-pressed="true" aria-label="Turn sound off"><span aria-hidden="true">🔊</span> <span>Sound on</span></button>
+      <button id="textSizeToggle" class="utility-button" type="button" aria-pressed="false" aria-label="Toggle larger text">A+ <span>Text</span></button>
+      <span class="account-divider" aria-hidden="true"></span>
+      <span class="account-name" id="accountName" aria-label="Signed in account">Account</span>
+      <button id="signOutBtn" class="utility-button signout-button" type="button">Sign out</button>
     </div>
-  </header>
+  </div>
+</header><main class="f1-wrap camera-page" aria-label="Color workspace"><div class="page-heading"><div><h1 id="pageTitle">Hue<span>See</span></h1></div><p id="pageHint">Move to inspect. Click or tap to pin.</p></div><div class="app-shell" id="workspace">
+<div class="workspace-grid">
+<section aria-label="Live camera workspace" class="camera-column">
+<div class="camera-stage" id="cameraFrame">
+<video aria-hidden="true" autoplay="" class="camera-source" id="webcam" muted="" playsinline=""></video>
+<canvas aria-describedby="sampleInstructions" aria-label="Live camera workspace. In HueSee, hover or tap to sample and pin a color. In HueFind, choose a target and tap an object to focus it. In HueDo, watch the live target and destination markers." id="outputCanvas" role="group" tabindex="0"></canvas>
+<svg id="hueFindVectorOverlay" class="hue-find-vector-overlay" aria-hidden="true" viewBox="0 0 320 240" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg"><path id="hueFindPathShadow" class="hue-find-contour-shadow"></path><path id="hueFindPath" class="hue-find-contour"></path></svg>
+<div aria-hidden="true" class="camera-chip-layer" id="cameraChipLayer"></div>
+<div class="camera-topbar">
+<span aria-live="polite" class="camera-status" id="cameraStatus" role="status">
+<span aria-hidden="true" class="status-dot"></span>
+<span id="cameraStatusText">Camera off</span>
+</span>
+<div class="camera-top-actions">
+<label class="camera-source-picker" for="cameraDeviceSelect"><span>Camera</span><select id="cameraDeviceSelect" aria-label="Choose camera"><option value="">Default</option></select></label>
+<button aria-label="Hide detected color labels" aria-pressed="true" class="camera-label-toggle" id="colorChipToggle" type="button">
+<span aria-hidden="true" class="camera-label-toggle-icon">▦</span>
+<span id="colorChipToggleText">Hide color labels</span>
+</button>
+<button id="snapshotBtn" class="button camera-button" type="button" disabled aria-label="Take a picture for HueDo">Take picture</button>
+<button aria-pressed="false" class="button camera-button" id="toggleCamBtn" type="button">
+<span aria-hidden="true" class="camera-glyph"></span>
+<span id="toggleCamLabel">Start camera</span>
+</button>
+</div>
+</div>
+<div aria-hidden="true" class="sample-reticle" id="sampleReticle"></div>
+<div aria-hidden="true" class="sample-indicator" id="sampleIndicator">
+<span class="sample-swatch" id="sampleSwatch"></span>
+<span class="sample-indicator-copy">
+<strong id="sampleName">Color</strong>
+<span class="sample-indicator-hex" id="sampleHex">#000000</span>
+<span class="sample-indicator-rgb" id="sampleRgb">RGB 0, 0, 0</span>
+</span>
+<span aria-hidden="true" class="sample-pin-icon">PINNED</span>
+</div>
+<div class="camera-placeholder" id="cameraPlaceholder">
+<div aria-hidden="true" class="placeholder-art"><span></span><span></span><span></span></div>
+<p>Camera off</p>
+</div>
+<div aria-live="polite" class="mode-preview" id="modePreview">Identify colors in your camera view.</div>
+<nav aria-label="Choose a mode" class="mode-switcher" role="tablist">
+<button aria-controls="huesee" aria-selected="true" class="mode-button is-active" data-mode-button="see" id="modeSeeBtn" role="tab" type="button">
+<span aria-hidden="true" class="mode-icon">◉</span><span>HueSee</span>
+</button>
+<button aria-controls="huefind" aria-selected="false" class="mode-button" data-mode-button="find" id="modeFindBtn" role="tab" type="button">
+<span aria-hidden="true" class="mode-icon">⌖</span><span>HueFind</span>
+</button>
+<button aria-controls="huedo" aria-selected="false" class="mode-button" data-mode-button="do" id="modeDoBtn" role="tab" type="button">
+<span aria-hidden="true" class="mode-icon">✳</span><span>HueDo</span>
+</button>
+<button aria-controls="huememory" aria-selected="false" class="mode-button" data-mode-button="memory" id="modeMemoryBtn" role="tab" type="button">
+<span aria-hidden="true" class="mode-icon">▦</span><span>HueMemory</span>
+</button>
+</nav>
+</div>
+<p class="sr-only" id="sampleInstructions">In HueSee, hover or tap to sample and pin a color. In HueFind, tap a matching region to focus it. In HueDo, live circles, outlines, and arrows follow the task target and destination.</p>
+</section>
+<aside aria-label="Mode controls and color information" class="mode-panel">
+<section aria-labelledby="modeSeeBtn" class="mode-view is-active" data-mode-panel="see" id="huesee" role="tabpanel">
+<div class="panel-heading">
+<div>
 
-  <main id="workspace" class="app-shell">
-    <div class="workspace-grid">
-      <section class="camera-column" aria-label="Live camera workspace">
-        <div class="camera-stage" id="cameraFrame">
-          <video id="webcam" class="camera-source" autoplay playsinline muted aria-hidden="true"></video>
-          <canvas
-            id="outputCanvas"
-            tabindex="0"
-            role="group"
-            aria-label="Live camera color sampler. Move the pointer over the image to inspect a color. On a touchscreen, press and drag. Use arrow keys to move the sample point, then press Enter or Space to hear the color details. Hold Shift while using an arrow key to move farther."
-            aria-describedby="sampleInstructions"
-          ></canvas>
-
-          <div id="cameraChipLayer" class="camera-chip-layer" aria-hidden="true"></div>
-
-          <div class="camera-topbar">
-            <span id="cameraStatus" class="camera-status" role="status" aria-live="polite">
-              <span class="status-dot" aria-hidden="true"></span>
-              <span id="cameraStatusText">Camera off</span>
-            </span>
-            <div class="camera-top-actions">
-              <button id="colorChipToggle" class="icon-button" type="button" aria-pressed="true" aria-label="Hide color chips" title="Toggle color chips">
-                <span aria-hidden="true">◉</span>
-              </button>
-              <button id="toggleCamBtn" class="button camera-button" type="button" aria-pressed="false">
-                <span class="camera-glyph" aria-hidden="true"></span>
-                <span id="toggleCamLabel">Start camera</span>
-              </button>
-            </div>
-          </div>
-
-          <div id="sampleIndicator" class="sample-indicator" aria-hidden="true">
-            <span id="sampleSwatch" class="sample-swatch"></span>
-            <span id="sampleName">Color</span>
-          </div>
-
-          <div id="cameraPlaceholder" class="camera-placeholder">
-            <div class="placeholder-art" aria-hidden="true"><span></span><span></span><span></span></div>
-            <p>Camera off</p>
-          </div>
-
-          <div id="modePreview" class="mode-preview" aria-live="polite">Identify colors in your camera view.</div>
-          <nav class="mode-switcher" role="tablist" aria-label="Choose a mode">
-            <button class="mode-button is-active" id="modeSeeBtn" type="button" role="tab" aria-selected="true" aria-controls="huesee" data-mode-button="see">
-              <span class="mode-icon" aria-hidden="true">◉</span><span>HueSee</span>
-            </button>
-            <button class="mode-button" id="modeFindBtn" type="button" role="tab" aria-selected="false" aria-controls="huefind" data-mode-button="find">
-              <span class="mode-icon" aria-hidden="true">⌖</span><span>HueFind</span>
-            </button>
-            <button class="mode-button" id="modeDoBtn" type="button" role="tab" aria-selected="false" aria-controls="huedo" data-mode-button="do">
-              <span class="mode-icon" aria-hidden="true">✳</span><span>HueDo</span>
-            </button>
-            <button class="mode-button" id="modeMemoryBtn" type="button" role="tab" aria-selected="false" aria-controls="huememory" data-mode-button="memory">
-              <span class="mode-icon" aria-hidden="true">▦</span><span>HueMemory</span>
-            </button>
-          </nav>
-        </div>
-        <p id="sampleInstructions" class="sr-only">Hover, tap, or use arrow keys to sample a color.</p>
-      </section>
-
-      <aside class="mode-panel" aria-label="Mode controls and color information">
-        <section id="huesee" class="mode-view is-active" role="tabpanel" aria-labelledby="modeSeeBtn" data-mode-panel="see">
+<h1>Your color, up close.</h1>
+</div>
+<span aria-hidden="true" class="panel-live-mark"></span>
+</div>
+<div class="selected-color">
+<div aria-hidden="true" class="color-preview" id="colorPreview"></div>
+<div class="selected-color-copy">
+<p class="selected-label">IDENTIFIED AS</p>
+<p class="selected-color-name" id="colorName">No sample yet</p>
+<p class="selected-color-description" id="colorDescription">Hover over a color to explore.</p>
+</div>
+</div>
+<dl class="color-values">
+<div class="value-row"><dt>HEX</dt><dd id="colorHex">—</dd></div>
+<div class="value-row"><dt>RGB</dt><dd id="colorRgb">—</dd></div>
+<div class="value-row"><dt>HSL</dt><dd id="colorHsl">—</dd></div>
+</dl>
+<p class="reading-instructions">Hover for a live color reading. Click or tap to pin it. The displayed HEX and RGB stay fixed until you unpin.</p>
+<div class="panel-actions huesee-actions">
+<button class="button button-secondary" disabled="" id="speakDetailsBtn" type="button">Speak color</button>
+<button aria-pressed="false" class="button button-primary" disabled="" id="pinColorBtn" type="button">Pin reading</button>
+<button class="button button-quiet" disabled="" id="refineShadeBtn" type="button" title="Send a small crop of your pinned spot to Google Gemini for an optional shade estimate">Refine shade with Gemini</button>
+<button class="button button-quiet" disabled="" id="saveColorBtn" type="button">Save pinned color to HueMemory</button>
+</div>
+<p aria-live="polite" class="reading-status" id="readingStatus" role="status">Start the camera to identify colors.</p>
+<p aria-live="polite" class="inline-status" id="saveColorStatus" role="status"></p>
+<div class="detected-section">
+<div class="subsection-heading"><h2>Colors in view</h2><button class="button button-secondary scene-button" disabled="" id="scanSceneBtn" type="button">Scan scene</button></div>
+<ul class="detected-color-list" id="detectedColors">
+<li class="detected-empty">Scan when you want a scene overview.</li>
+</ul>
+</div>
+</section>
+<section aria-labelledby="modeFindBtn" class="mode-view" data-mode-panel="find" hidden="" id="huefind" role="tabpanel">
+<div class="panel-heading">
+<div><h1>Find a color</h1></div>
+<span aria-hidden="true" class="panel-live-mark"></span>
+</div>
+<div class="find-controls">
+<div class="field-group">
+<label for="colorSelect">Search for any color or shade</label>
+<div class="hue-find-search-row">
+<input id="colorSelect" type="text" autocomplete="off" spellcheck="false" enterkeyhint="search"
+  placeholder="e.g. sage green, burgundy, #7FFF00" maxlength="100" aria-describedby="findSearchHint" />
+<button class="button button-primary" id="findShadeBtn" type="button">Find</button>
+</div>
+<p id="findSearchHint" class="find-focus-instruction">Type a color name, shade, HEX, or RGB value, then press Enter or Find.</p>
+</div>
+<button class="button button-secondary full-button" disabled="" id="sampleFindBtn" type="button">Find sampled color</button>
+<p class="find-focus-instruction">Tap a matching object in the camera to follow just that region.</p>
+<button class="button button-secondary full-button" id="focusResetBtn" type="button">Reset object focus &amp; color</button>
+<div class="field-group"><label>Lighting correction (optional)</label>
+<button class="button button-secondary full-button" id="calibrateBtn" type="button">Calibrate from white card</button>
+<p id="calibrationStatus" class="find-focus-instruction" role="status" aria-live="polite">Hold a white or neutral-gray card at the center of the camera, then calibrate.</p>
+</div>
+<button class="text-button" id="clearFindBtn" type="button">Clear target</button>
+</div>
+<div class="find-feedback">
+<span aria-hidden="true" class="feedback-icon">⌖</span>
+<p aria-live="polite" id="findResult" role="status">Choose a target to begin.</p>
+</div>
+<p class="panel-hint">One smooth color-based outline at a time. Complex multicolored objects may need ML segmentation.</p>
+</section>
+<section id="huedo" class="mode-view" role="tabpanel" aria-labelledby="modeDoBtn" data-mode-panel="do" hidden>
           <div class="panel-heading">
-            <div>
-              <p class="panel-kicker">HUESEE</p>
-              <h1>Color details</h1>
-            </div>
-            <span class="panel-live-mark" aria-hidden="true"></span>
-          </div>
-
-          <div class="selected-color">
-            <div id="colorPreview" class="color-preview" aria-hidden="true"></div>
-            <div class="selected-color-copy">
-              <p class="selected-label">IDENTIFIED AS</p>
-              <p id="colorName" class="selected-color-name">No sample yet</p>
-              <p id="colorDescription" class="selected-color-description">Tap the camera view to sample.</p>
-            </div>
-          </div>
-
-          <dl class="color-values">
-            <div class="value-row"><dt>HEX</dt><dd id="colorHex">—</dd></div>
-            <div class="value-row"><dt>RGB</dt><dd id="colorRgb">—</dd></div>
-            <div class="value-row"><dt>HSL</dt><dd id="colorHsl">—</dd></div>
-          </dl>
-
-          <div class="panel-actions">
-            <button id="speakDetailsBtn" class="button button-secondary" type="button" disabled>Speak</button>
-            <button id="saveColorBtn" class="button button-primary" type="button" disabled>Save color</button>
-          </div>
-          <p id="saveColorStatus" class="inline-status" role="status" aria-live="polite"></p>
-
-          <div class="detected-section">
-            <div class="subsection-heading"><h2>Colors in view</h2><span class="live-tag">LIVE</span></div>
-            <ul id="detectedColors" class="detected-color-list">
-              <li class="detected-empty">Start the camera to scan.</li>
-            </ul>
-          </div>
-        </section>
-
-        <section id="huefind" class="mode-view" role="tabpanel" aria-labelledby="modeFindBtn" data-mode-panel="find" hidden>
-          <div class="panel-heading">
-            <div><p class="panel-kicker">HUEFIND</p><h1>Find a color</h1></div>
-            <span class="panel-live-mark" aria-hidden="true"></span>
-          </div>
-          <div class="find-controls">
-            <div class="field-group">
-              <label for="colorSelect">Target color</label>
-              <select id="colorSelect" disabled>
-                <option value="">Choose a color</option>
-                <option value="Red">Red</option><option value="Orange">Orange</option>
-                <option value="Yellow">Yellow</option><option value="Green">Green</option>
-                <option value="Cyan">Cyan</option><option value="Blue">Blue</option>
-                <option value="Purple">Purple</option><option value="Black">Black</option>
-              </select>
-            </div>
-            <button id="sampleFindBtn" class="button button-secondary full-button" type="button" disabled>Find sampled color</button>
-            <button id="clearFindBtn" class="text-button" type="button">Clear target</button>
-          </div>
-          <div class="find-feedback">
-            <span class="feedback-icon" aria-hidden="true">⌖</span>
-            <p id="findResult" role="status" aria-live="polite">Choose a target to begin.</p>
-          </div>
-          <p class="panel-hint">Matching areas are outlined in the camera view.</p>
-        </section>
-
-        <section id="huedo" class="mode-view" role="tabpanel" aria-labelledby="modeDoBtn" data-mode-panel="do" hidden>
-          <div class="panel-heading">
-            <div><p class="panel-kicker">HUEDO</p><h1>Guided task</h1></div>
+            <div><h1>Guided task</h1></div>
             <span class="gemini-mark" aria-hidden="true">✳</span>
           </div>
 
           <div class="feature-card interpreter-card">
             <label class="field-label" for="instructionInput">What do you need to do?</label>
-            <textarea id="instructionInput" rows="3" placeholder="Anything you need help with…"></textarea>
+            <textarea id="instructionInput" rows="3" placeholder="e.g. Where is the pink pen?"></textarea>
             <div class="upload-row">
-              <label class="file-button" for="instructionImageInput">＋ Add photo</label>
+              <label class="file-button" for="instructionImageInput">＋ Upload picture</label>
               <input id="instructionImageInput" type="file" accept="image/*">
-              <span id="instructionFileName" class="file-name">No photo</span>
+              <span id="instructionFileName" class="file-name">No picture yet</span>
+              <button id="clearSceneBtn" class="text-button" type="button" hidden>Clear picture</button>
             </div>
+            <p class="panel-hint">With the webcam on, Build visual guide analyzes the current frame and follows detected objects live with circles, outlines, and arrows. You can also upload a reference picture.</p>
             <div id="instructionImagePreview" class="instruction-image-preview" hidden></div>
             <button id="interpretBtn" class="button button-primary full-button" type="button">Build visual guide</button>
             <p id="interpretStatus" class="inline-status" role="status" aria-live="polite"></p>
 
             <div id="parsedTask" class="parsed-task" hidden>
-              <div class="parsed-heading"><h2>Task guide</h2><span class="confirm-mark" aria-hidden="true">✓</span></div>
-              <div class="field-group">
-                <label for="taskSummaryInput">Task</label>
-                <textarea id="taskSummaryInput" rows="2"></textarea>
+              <div class="parsed-heading"><h2>Did I get this right?</h2><span class="confirm-mark" aria-hidden="true">?</span></div>
+              <p id="taskSourceNote" class="task-source-note"></p>
+              <p id="taskReadback" class="task-readback" aria-live="polite"></p>
+              <p id="taskAnswer" class="task-answer" hidden></p>
+              <div class="parsed-fields">
+                <div class="field-group">
+                  <label for="taskColorInput">Color</label>
+                  <input id="taskColorInput" type="text" placeholder="pink">
+                </div>
+                <div class="field-group">
+                  <label for="taskObjectInput">Object</label>
+                  <input id="taskObjectInput" type="text" placeholder="pen">
+                </div>
+                <div class="field-group">
+                  <label for="taskActionInput">Action</label>
+                  <input id="taskActionInput" type="text" placeholder="find">
+                </div>
+                <div class="field-group">
+                  <label for="taskDestinationInput">Destination</label>
+                  <input id="taskDestinationInput" type="text" placeholder="(optional) Box B">
+                </div>
               </div>
               <div class="task-steps-wrap">
                 <p class="field-label">Steps</p>
                 <ol id="taskStepsPreview" class="task-steps-preview"></ol>
               </div>
-              <div id="taskCuePreview" class="task-cue-preview"></div>
-              <button id="saveTaskBtn" class="button button-secondary full-button" type="button">Use this guide</button>
+              <div class="confirm-actions">
+                <button id="readTaskBtn" class="button button-secondary" type="button">🔊 Read to me</button>
+                <button id="saveTaskBtn" class="button button-primary" type="button">Yes, start guide</button>
+              </div>
             </div>
           </div>
 
@@ -189,9 +196,22 @@
             <div id="activeTaskEmpty" class="task-empty"><p>No active guide</p></div>
             <div id="activeTaskContent" hidden>
               <p id="activeTaskSummary" class="active-task-summary"></p>
-              <ol id="activeTaskSteps" class="task-steps-preview"></ol>
-              <p id="taskResult" class="task-result" role="status" aria-live="polite">Start the camera to follow the guide.</p>
-              <button id="taskBtn" class="button button-primary full-button" type="button" disabled>Mark complete</button>
+              <div id="guideStepCard" class="guide-step-card">
+                <p id="guideStepCount" class="guide-step-count">Step 1 of 1</p>
+                <p id="guideStepText" class="guide-step-text"></p>
+                <button id="checkPictureBtn" class="button button-secondary full-button check-picture-button" type="button" hidden>📷 Check with a new picture</button>
+              </div>
+              <div id="guideDone" class="guide-done" hidden>
+                <span class="guide-done-symbol" aria-hidden="true">✓</span>
+                <p id="guideDoneText" class="guide-done-text">Task complete</p>
+              </div>
+              <ol id="activeTaskSteps" class="task-steps-preview guide-steps"></ol>
+              <p id="taskResult" class="task-result" role="status" aria-live="polite">Start the camera to see live guide markers.</p>
+              <div class="guide-controls">
+                <button id="prevStepBtn" class="button button-quiet" type="button">Back</button>
+                <button id="repeatStepBtn" class="button button-secondary" type="button">🔊 Repeat</button>
+                <button id="taskBtn" class="button button-primary" type="button">Next</button>
+              </div>
               <button id="clearTaskBtn" class="text-button" type="button">Clear guide</button>
             </div>
           </div>
@@ -202,22 +222,27 @@
           </div>
         </section>
 
-        <section id="huememory" class="mode-view" role="tabpanel" aria-labelledby="modeMemoryBtn" data-mode-panel="memory" hidden>
-          <div class="panel-heading">
-            <div><p class="panel-kicker">HUEMEMORY</p><h1>Saved colors</h1></div>
-            <span class="panel-live-mark" aria-hidden="true"></span>
-          </div>
-          <div id="palette" class="palette-mount"></div>
-          <div class="feature-card image-picker-card">
-            <div class="subsection-heading"><h2>Pick from a photo</h2></div>
-            <div id="image-picker"></div>
-          </div>
-        </section>
-      </aside>
-    </div>
-  </main>
-
-  <div id="audioAnnouncement" class="sr-only" aria-live="assertive" aria-atomic="true"></div>
-  <script type="module" src="/script.js"></script>
-</body>
-</html>
+        <section aria-labelledby="modeMemoryBtn" class="mode-view" data-mode-panel="memory" hidden="" id="huememory" role="tabpanel">
+<div class="panel-heading">
+<div><h1>Saved colors</h1></div>
+<span aria-hidden="true" class="panel-live-mark"></span>
+</div>
+<div class="palette-mount" id="palette"></div>
+<div class="feature-card image-picker-card">
+<div class="subsection-heading"><h2>Pick from a photo</h2></div>
+<div id="image-picker"></div>
+</div>
+</section>
+</aside>
+</div>
+</div></main><div id="audioAnnouncement" class="sr-only" aria-live="assertive" aria-atomic="true"></div><script type="module" src="/script.js"></script>
+<dialog id="findSuggestionDialog" class="hue-find-suggestion-dialog" aria-labelledby="findSuggestionTitle" aria-describedby="findSuggestionText">
+<div class="hue-find-dialog-head">
+<p class="panel-kicker">CLOSEST MATCH</p>
+<button id="findSuggestionClose" type="button" class="hue-find-dialog-close" aria-label="Close suggestions">×</button>
+</div>
+<h2 id="findSuggestionTitle">Couldn't find that shade</h2>
+<p id="findSuggestionText">Here are the closest options.</p>
+<div id="findSuggestionOptions" class="hue-find-suggestion-options"></div>
+<button type="button" id="findSuggestionKeep" class="button button-secondary full-button">Keep searching</button>
+</dialog></body></html>

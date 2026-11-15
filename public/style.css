@@ -647,3 +647,26 @@ body.high-contrast :focus-visible { outline-width: 4px; }
   .camera-status.is-live .status-dot { animation: none; }
   .selected-color, .color-values, .panel-actions, .detected-section, .task-cue-pill { animation: none; }
 }
+
+
+/* HueDo photo-based guide controls from test-merge */
+/* HueDo guided task */
+.task-source-note { margin: 0 0 8px; color: var(--subtle); font-size: 9px; }
+.task-readback { margin: 0 0 12px; padding: 10px 12px; border-radius: 11px; background: var(--brand-soft); color: var(--brand-deep); font-size: 12px; font-weight: 850; }
+.confirm-actions, .guide-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+.guide-controls { grid-template-columns: .8fr 1fr 1.2fr; }
+.guide-step-card { padding: 12px; border: 2px solid var(--brand); border-radius: 13px; background: var(--surface-soft); }
+.guide-step-count { margin: 0; color: var(--brand); font-size: 9px; font-weight: 900; letter-spacing: .06em; text-transform: uppercase; }
+.guide-step-text { margin: 5px 0 0; color: var(--ink); font-size: 13px; font-weight: 800; line-height: 1.4; }
+.check-picture-button { margin-top: 10px; }
+.task-answer { margin: -4px 0 12px; color: var(--ink); font-size: 11px; font-weight: 700; line-height: 1.45; }
+.inline-status.is-error { color: var(--danger); font-weight: 800; }
+.guide-done { display: flex; align-items: center; gap: 12px; padding: 14px; border: 2px solid var(--success); border-radius: 13px; background: #e5f3ea; animation: panel-arrive .28s ease both; }
+.guide-done-symbol { display: inline-grid; width: 42px; height: 42px; flex: 0 0 42px; place-items: center; border-radius: 50%; background: var(--success); color: #fff; font-size: 24px; font-weight: 900; }
+.guide-done-text { margin: 0; color: var(--success); font-size: 13px; font-weight: 850; }
+.guide-steps { margin-top: 12px; }
+.guide-steps li.is-current { color: var(--ink); font-weight: 850; }
+.guide-steps li.is-done { color: var(--success); text-decoration: line-through; }
+.guide-steps li.is-done::marker { content: "✓ "; }
+.camera-stage.is-scene #outputCanvas { cursor: default; }
+body.high-contrast .guide-step-card, body.high-contrast .guide-done { border-width: 3px; }

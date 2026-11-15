@@ -1,24 +1,79 @@
 import { analyzeVideoFrame } from "/src/vision/cameraProcessor.js";
-import { classifyColor } from "/src/vision/colorDetector.js";
+import { classifyColor, TemporalMaskStabilizer } from "/src/vision/colorDetector.js";
+import { selectDisplayRegions } from "/src/vision/regionPresentation.js";
+import { findSmoothColorContours, SmoothContourTracker, pickFocusedContour } from "/src/vision/smoothContours.js";
+import { calculateNeutralGains, neutralReferenceFromCenter } from "/src/vision/cameraCalibration.js";
+import { closestReferenceShade } from "/src/vision/referenceColors.js";
+import { sanitizeGeminiShade } from "/src/vision/shadeNaming.js";
+import { describeDetailedShade, createShadeIdentityTracker } from "/src/vision/perceptualShade.js";
+import { resolveFindShade, suggestFindShadeNames, findClosestVisibleShade } from "/src/vision/hueFindSearch.js";
+import { averagePixelRegion } from "/src/vision/sampleColor.js";
+import { LiveObjectTracker } from "/src/vision/liveObjectTracker.js";
+import { createFluidReading } from "/src/vision/fluidReading.js";
 import {
   saveColor,
   createTask,
   loadTasks,
   completeTask,
-  interpret
+  deleteTask,
+  interpret,
+  checkTask
 } from "/js/huememory.js";
+import {
+  parseInstruction, buildGuideSteps, describeTask, describeTarget,
+  normalizeRelation, normalizeColorName, isPlural, isSortTask
+} from "/js/hueDoParser.js";
 import { mountPalette } from "/js/palettePanel.js";
 import { mountImagePicker } from "/js/imagePicker.js";
 
+document.documentElement.classList.add("js");
 const $ = (id) => document.getElementById(id);
+// Account ownership is enforced on the server. This display is informational only.
+fetch("/api/auth/me", { credentials: "same-origin" })
+  .then(response => response.json())
+  .then(({ user, demo }) => {
+    if (!user && !demo) { window.location.assign("/login"); return; }
+    const label = $("accountName");
+    if (label) label.textContent = demo ? "Demo mode" : (user.name || user.email);
+    if (demo) $("signOutBtn").textContent = "Back to sign in";
+    window.hueDemoMode = Boolean(demo);
+  }).catch(() => {});
+$("signOutBtn")?.addEventListener("click", async () => {
+  if (window.hueDemoMode) { window.location.assign("/exit-demo"); return; }
+  const button = $("signOutBtn");
+  button.disabled = true;
+  try {
+    await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
+    window.location.assign("/login");
+  } catch {
+    button.disabled = false;
+  }
+});
 
 const video = $("webcam");
 const canvas = $("outputCanvas");
 const ctx = canvas.getContext("2d", { willReadFrequently: true });
+const hueFindVectorOverlay = $("hueFindVectorOverlay");
+const hueFindPath = $("hueFindPath");
+const hueFindPathShadow = $("hueFindPathShadow");
+
+// Never draw camera frames on the overlay: only HueFind contours and HueDo guides.
+const analysisCanvas = document.createElement("canvas");
 
 const toggleCamBtn = $("toggleCamBtn");
 const toggleCamLabel = $("toggleCamLabel");
 const colorSelect = $("colorSelect");
+const findShadeBtn = $("findShadeBtn");
+const findSuggestionDialog = $("findSuggestionDialog");
+const findSuggestionTitle = $("findSuggestionTitle");
+const findSuggestionText = $("findSuggestionText");
+const findSuggestionOptions = $("findSuggestionOptions");
+const findSuggestionClose = $("findSuggestionClose");
+const findSuggestionKeep = $("findSuggestionKeep");
+const cameraDeviceSelect = $("cameraDeviceSelect");
+const focusResetBtn = $("focusResetBtn");
+const calibrateBtn = $("calibrateBtn");
+const calibrationStatus = $("calibrationStatus");
 const sampleFindBtn = $("sampleFindBtn");
 const clearFindBtn = $("clearFindBtn");
 const findResult = $("findResult");
@@ -32,6 +87,13 @@ const cameraFrame = $("cameraFrame");
 const sampleIndicator = $("sampleIndicator");
 const sampleSwatch = $("sampleSwatch");
 const sampleName = $("sampleName");
+const sampleHex = $("sampleHex");
+const sampleRgb = $("sampleRgb");
+const sampleReticle = $("sampleReticle");
+const pinColorBtn = $("pinColorBtn");
+const refineShadeBtn = $("refineShadeBtn");
+const readingStatus = $("readingStatus");
+const scanSceneBtn = $("scanSceneBtn");
 const colorPreview = $("colorPreview");
 const colorNameDisplay = $("colorName");
 const colorDescription = $("colorDescription");
@@ -42,9 +104,11 @@ const speakDetailsBtn = $("speakDetailsBtn");
 const saveColorBtn = $("saveColorBtn");
 const saveColorStatus = $("saveColorStatus");
 const detectedColorsList = $("detectedColors");
+const themeToggle = $("themeToggle");
 const contrastToggle = $("contrastToggle");
 const textSizeToggle = $("textSizeToggle");
 const colorChipToggle = $("colorChipToggle");
+const colorChipToggleText = $("colorChipToggleText");
 const cameraChipLayer = $("cameraChipLayer");
 const modePreview = $("modePreview");
 const modeButtons = [...document.querySelectorAll("[data-mode-button]")];
@@ -57,9 +121,26 @@ const instructionImagePreview = $("instructionImagePreview");
 const interpretBtn = $("interpretBtn");
 const interpretStatus = $("interpretStatus");
 const parsedTask = $("parsedTask");
-const taskSummaryInput = $("taskSummaryInput");
+const taskSourceNote = $("taskSourceNote");
+const taskReadback = $("taskReadback");
+const taskColorInput = $("taskColorInput");
+const taskObjectInput = $("taskObjectInput");
+const taskActionInput = $("taskActionInput");
+const taskDestinationInput = $("taskDestinationInput");
+const taskAnswer = $("taskAnswer");
+const snapshotBtn = $("snapshotBtn");
+const clearSceneBtn = $("clearSceneBtn");
+const checkPictureBtn = $("checkPictureBtn");
+const readTaskBtn = $("readTaskBtn");
 const taskStepsPreview = $("taskStepsPreview");
-const taskCuePreview = $("taskCuePreview");
+const guideStepCard = $("guideStepCard");
+const guideStepCount = $("guideStepCount");
+const guideStepText = $("guideStepText");
+const guideDone = $("guideDone");
+const guideDoneText = $("guideDoneText");
+const prevStepBtn = $("prevStepBtn");
+const repeatStepBtn = $("repeatStepBtn");
+const soundToggle = $("soundToggle");
 const saveTaskBtn = $("saveTaskBtn");
 const activeTaskEmpty = $("activeTaskEmpty");
 const activeTaskContent = $("activeTaskContent");
@@ -80,15 +161,45 @@ let latestColors = [];
 let targetColor = "";
 let targetRgb = null;
 let targetShade = "";
+let targetStrictShade = false;
+let findNoMatchFrames = 0;
+let findSuggestionShown = false;
 let pointerIsDown = false;
 let pointerIsOverCanvas = false;
 let keyboardSamplingActive = false;
 let currentSample = null;
+let pinnedSample = null;
+let pinnedPosition = null;
+let pinnedReferenceImage = null;
+let geminiShade = null;
+let geminiShadeBusy = false;
+let geminiShadeRequestId = 0;
+let geminiShadeAbort = null;
+let pointerStart = null;
+let lastSampleTime = 0;
+let lastFrameAnalysis = 0;
+let scanSceneRequested = false;
+let hasScannedScene = false;
+const steadyReading = createFluidReading();
+const hueSeeShadeIdentity = createShadeIdentityTracker();
+const SAMPLE_INTERVAL_MS = 32;
+const FRAME_INTERVAL_MS = 180;
+const FIND_INTERVAL_MS = 95;
+const hueFindTracker = new SmoothContourTracker({ blend: .32, confirmationFrames: 2, holdFrames: 6 });
+const hueDoColorTracker = new SmoothContourTracker({ blend: .42, confirmationFrames: 1, holdFrames: 3 });
+const hueDoTrackers = { target: new LiveObjectTracker(), destination: new LiveObjectTracker() };
+let hueDoLastResults = { target: null, destination: null };
+let hueDoLastFrame = 0;
+let hueDoReferenceLabels = { target: "Target", destination: "Destination" };
+let focusedContourId = null;
+let pendingFocusPoint = null;
+let neutralGains = null;
 let lastSamplePosition = null;
 let keyboardPosition = { x: 0.5, y: 0.5 };
 let detectedLayoutSignature = "";
 let detectedItemsByName = new Map();
 let showColorChips = true;
+const hueSeeRegionStabilizer = new TemporalMaskStabilizer({ holdFrames: 2 });
 let currentMode = "see";
 let cameraChipNodes = new Map();
 let pendingTaskDraft = null;
@@ -96,14 +207,19 @@ let activeTask = null;
 let taskCheckFrames = 0;
 let taskSuccessStreak = 0;
 let taskCompletionPending = false;
-let instructionImage = null;
-let instructionImageUrl = null;
+let guideStepIndex = 0;
+let scenePhoto = null;
+let sceneLocations = [];
+let soundOn = true;
+try { soundOn = localStorage.getItem("hue-sound") !== "off"; } catch { /* storage disabled */ }
+let activeTheme = "light";
+try { activeTheme = localStorage.getItem("hue-theme") || (window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light"); } catch { /* storage disabled */ }
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
 const modeDescriptions = {
   see: "Identify colors in your camera view.",
-  find: "Choose a color and follow its dotted outline.",
+  find: "Search for a shade and follow its outline.",
   do: "Turn any instruction into an on-camera visual guide.",
   memory: "Save shades and bring them back when you need them."
 };
@@ -135,10 +251,49 @@ function setModePreview(mode) {
   }, 90);
 }
 
+function updateColorChipToggleCopy() {
+  if (!colorChipToggle) return;
+  const noun = currentMode === "do" ? "guide labels" : "color labels";
+  const action = showColorChips ? "Hide" : "Show";
+  colorChipToggle.setAttribute("aria-label", `${action} ${noun}`);
+  colorChipToggle.title = `${action} ${noun}`;
+  if (colorChipToggleText) colorChipToggleText.textContent = `${action} ${noun}`;
+}
+
 function setActiveMode(mode) {
   const allowed = ["see", "find", "do", "memory"];
   const nextMode = allowed.includes(mode) ? mode : "see";
+  if (currentMode !== nextMode) { hueFindTracker.reset(); focusedContourId = null; pendingFocusPoint = null; hueSeeShadeIdentity.reset(); }
+  const leavingScene = currentMode === "do" && nextMode !== "do" && Boolean(scenePhoto);
   currentMode = nextMode;
+  updateColorChipToggleCopy();
+  if (leavingScene) {
+    cameraFrame.classList.remove("is-scene");
+    canvas.width = 320;
+    canvas.height = video.videoWidth ? Math.max(1, Math.round(320 * video.videoHeight / video.videoWidth)) : 240;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    setCameraChips([]);
+  }
+  const pageTitle = document.getElementById("pageTitle");
+  const pageHint = document.getElementById("pageHint");
+  if (pageTitle) {
+    const words = { see: ["Hue", "See"], find: ["Hue", "Find"], do: ["Hue", "Do"], memory: ["Hue", "Memory"] };
+    const [first, second] = words[nextMode];
+    pageTitle.innerHTML = `${first}<span>${second}</span>`;
+  }
+  if (pageHint) pageHint.textContent = { see: "Move to inspect. Click or tap to pin.", find: "Choose a color to find its matching areas.", do: "Follow live target and destination markers.", memory: "Your saved colors and shades." }[nextMode];
+  cameraFrame.classList.toggle("is-see-mode", nextMode === "see");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  clearVectorOutline();
+  // The hovering HueSee tooltip must not cover the HueFind contour or task guides.
+  if (nextMode !== "see") {
+    sampleIndicator.classList.remove("is-visible");
+    sampleReticle.classList.remove("is-visible");
+  } else if (pinnedSample && pinnedPosition) {
+    movePinnedIndicator(pinnedPosition);
+  }
+  if (nextMode === "see") showHueSeeRegionLabels(latestColors);
+  if (nextMode === "find" && streaming && targetColor) drawTargetOverlay();
 
   modeButtons.forEach((button) => {
     const active = button.dataset.modeButton === nextMode;
@@ -154,7 +309,8 @@ function setActiveMode(mode) {
   });
 
   setModePreview(nextMode);
-  if (nextMode !== "see" && nextMode !== "find" && nextMode !== "do") setCameraChips([]);
+  if (nextMode === "memory") setCameraChips([]);
+  if (nextMode === "do") renderScene();
 }
 
 window.addEventListener("resize", () => placeModePreview(currentMode));
@@ -188,39 +344,32 @@ function setFeedback(element, message) {
 
 function normalizeColorCategory(value = "") {
   const color = String(value).trim().toLowerCase();
-  const supported = ["red", "orange", "yellow", "green", "cyan", "blue", "purple", "black"];
+  const supported = ["red", "orange", "yellow", "green", "cyan", "blue", "purple", "black", "white", "gray", "brown", "pink", "teal", "olive", "beige"];
   return supported.find((name) => color === name || color.includes(name)) || "";
-}
-
-function normalizeZone(value = "") {
-  const match = String(value).match(/\b(?:box|container|bin|zone)?\s*([ABC])\b/i);
-  return match ? `Box ${match[1].toUpperCase()}` : "";
-}
-
-function getZoneBounds(zoneName) {
-  const width = canvas.width || 320;
-  const height = canvas.height || 180;
-  const zoneWidth = width * 0.27;
-  const zoneHeight = height * 0.20;
-  const xByZone = {
-    "Box A": width * 0.035,
-    "Box B": width * 0.365,
-    "Box C": width * 0.695
-  };
-  const zoneX = xByZone[zoneName];
-  if (zoneX === undefined) return null;
-  return {
-    x: Math.round(zoneX),
-    y: Math.round(height * 0.62),
-    width: Math.round(zoneWidth),
-    height: Math.round(zoneHeight)
-  };
 }
 
 const chipColors = {
   red: "#ee7772", orange: "#e9a16b", yellow: "#e8d16d", green: "#81b88d",
-  cyan: "#7ccbc6", blue: "#7e9fdf", purple: "#b59ad9", black: "#68716d"
+  cyan: "#7ccbc6", blue: "#7e9fdf", purple: "#b59ad9", black: "#68716d",
+  gray: "#808080", white: "#ffffff", brown: "#8b4513", pink: "#ffc0cb",
+  teal: "#008080", olive: "#808000", beige: "#f5f5dc"
 };
+
+// In HueSee, show ONLY text labels at stabilized region centers. No outlines.
+function showHueSeeRegionLabels(colors = []) {
+  if (currentMode !== "see" || !showColorChips) {
+    setCameraChips([]);
+    return;
+  }
+  const regions = selectDisplayRegions(colors, { limit: 6, minSamples: 30 });
+  setCameraChips(regions.map((region) => ({
+    key: region.key,
+    label: region.rgb ? describeDetailedShade(region.rgb).name : region.name,
+    color: region.name,
+    point: region.center,
+    hex: chipColors[String(region.name).toLowerCase()] || region.hex
+  })));
+}
 
 function setCameraChips(entries = []) {
   const visible = entries.slice(0, 12);
@@ -270,83 +419,6 @@ function rgbToHex(rgb = {}) {
   return "#" + [rgb.r, rgb.g, rgb.b].map((value) => clamp(Math.round(Number(value) || 0), 0, 255).toString(16).padStart(2, "0")).join("").toUpperCase();
 }
 
-function getRegionCenter(region) {
-  if (region.center) return region.center;
-  const { x, y, width, height } = region.bounds;
-  return { x: x + width / 2, y: y + height / 2 };
-}
-
-function drawRegionOutline(region, accent = "#f7e8a6") {
-  if (!region?.outline?.length) {
-    if (!region?.bounds) return;
-    const { x, y, width, height } = region.bounds;
-    ctx.save();
-    ctx.lineWidth = 2;
-    ctx.setLineDash([2, 5]);
-    ctx.strokeStyle = accent;
-    ctx.strokeRect(x + 2, y + 2, Math.max(1, width - 4), Math.max(1, height - 4));
-    ctx.restore();
-    return;
-  }
-
-  const strokeSegments = () => {
-    ctx.beginPath();
-    for (const [x1, y1, x2, y2] of region.outline) {
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
-    }
-    ctx.stroke();
-  };
-
-  ctx.save();
-  ctx.lineCap = "round";
-  ctx.lineJoin = "round";
-  ctx.setLineDash([1.5, 3.5]);
-  ctx.lineWidth = 4.5;
-  ctx.strokeStyle = "rgba(8,16,13,.78)";
-  ctx.shadowColor = "rgba(0,0,0,.28)";
-  ctx.shadowBlur = 4;
-  strokeSegments();
-  ctx.shadowBlur = 0;
-  ctx.lineWidth = 2.2;
-  ctx.strokeStyle = accent;
-  strokeSegments();
-  ctx.restore();
-}
-
-function drawGuideBoxAt(point, label, accent = "#f3d88c") {
-  if (!point) return;
-  const width = Math.max(42, canvas.width * .19);
-  const height = Math.max(30, canvas.height * .17);
-  const x = clamp(point.x - width / 2, 3, canvas.width - width - 3);
-  const y = clamp(point.y - height / 2, 3, canvas.height - height - 3);
-  ctx.save();
-  ctx.lineWidth = 2.2;
-  ctx.setLineDash([3, 5]);
-  ctx.strokeStyle = "rgba(8,16,13,.78)";
-  ctx.strokeRect(x, y, width, height);
-  ctx.lineWidth = 1.4;
-  ctx.strokeStyle = accent;
-  ctx.strokeRect(x, y, width, height);
-  ctx.restore();
-  return { x: x + width / 2, y: y + height / 2 };
-}
-
-function drawZoneGuide(zoneName, accent = "#f4d78c") {
-  const zone = getZoneBounds(zoneName);
-  if (!zone) return null;
-  ctx.save();
-  ctx.lineWidth = 2.2;
-  ctx.setLineDash([3, 5]);
-  ctx.strokeStyle = "rgba(8,16,13,.78)";
-  ctx.strokeRect(zone.x, zone.y, zone.width, zone.height);
-  ctx.lineWidth = 1.4;
-  ctx.strokeStyle = accent;
-  ctx.strokeRect(zone.x, zone.y, zone.width, zone.height);
-  ctx.restore();
-  return { x: zone.x + zone.width / 2, y: zone.y + zone.height / 2 };
-}
-
 function drawArrow(from, to, accent = "#f4d989") {
   if (!from || !to) return;
   const dx = to.x - from.x;
@@ -387,218 +459,93 @@ function drawArrow(from, to, accent = "#f4d989") {
   ctx.restore();
 }
 
-function cuePoint(cue = {}) {
-  const zone = normalizeZone(`${cue.location || ""} ${cue.label || ""}`);
-  if (zone) {
-    const bounds = getZoneBounds(zone);
-    if (bounds) return { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+// Vector paths render sharply even when the canvas's 320px processing resolution
+// is scaled to a large laptop display. A closed Catmull-Rom spline smooths corners.
+function clearVectorOutline() {
+  hueFindPath?.setAttribute("d", "");
+  hueFindPathShadow?.setAttribute("d", "");
+}
+function contourSplinePath(points) {
+  if (!points || points.length < 3) return "";
+  const f = value => Number(value.toFixed(2));
+  let d = `M ${f(points[0][0])} ${f(points[0][1])}`;
+  const n = points.length;
+  for (let i = 0; i < n; i++) {
+    const p0 = points[(i + n - 1) % n], p1 = points[i];
+    const p2 = points[(i + 1) % n], p3 = points[(i + 2) % n];
+    const c1 = [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6];
+    const c2 = [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6];
+    d += ` C ${f(c1[0])} ${f(c1[1])} ${f(c2[0])} ${f(c2[1])} ${f(p2[0])} ${f(p2[1])}`;
   }
-
-  const words = `${cue.direction || ""} ${cue.location || ""}`.toLowerCase();
-  const horizontal = /\b(left|leftward)\b/.test(words) ? .2 : /\b(right|rightward)\b/.test(words) ? .8 : .5;
-  const vertical = /\b(above|upper|top|up)\b/.test(words) ? .2 : /\b(below|lower|bottom|down)\b/.test(words) ? .8 : .5;
-  const hasDirection = /\b(left|leftward|right|rightward|above|upper|top|up|below|lower|bottom|down|center|middle)\b/.test(words);
-  return hasDirection ? { x: canvas.width * horizontal, y: canvas.height * vertical } : null;
+  return d + " Z";
+}
+function drawSmoothTargetContour(points) {
+  const d = contourSplinePath(points);
+  hueFindPath?.setAttribute("d", d);
+  hueFindPathShadow?.setAttribute("d", d);
 }
 
-function getBinaryRegions(mask, width, height, step = 4) {
-  const columns = Math.ceil(width / step);
-  const rows = Math.ceil(height / step);
-  const visited = new Uint8Array(mask.length);
-  const regions = [];
-
-  for (let start = 0; start < mask.length; start += 1) {
-    if (!mask[start] || visited[start]) continue;
-    const queue = [start];
-    const cells = [];
-    const cellSet = new Set();
-    visited[start] = 1;
-    let cursor = 0;
-    let minX = columns, minY = rows, maxX = -1, maxY = -1;
-
-    while (cursor < queue.length) {
-      const index = queue[cursor++];
-      cells.push(index);
-      cellSet.add(index);
-      const gx = index % columns;
-      const gy = Math.floor(index / columns);
-      minX = Math.min(minX, gx); minY = Math.min(minY, gy);
-      maxX = Math.max(maxX, gx); maxY = Math.max(maxY, gy);
-      const neighbors = [
-        gy > 0 ? index - columns : -1,
-        gx < columns - 1 ? index + 1 : -1,
-        gy < rows - 1 ? index + columns : -1,
-        gx > 0 ? index - 1 : -1
-      ];
-      for (const neighbor of neighbors) {
-        if (neighbor < 0 || !mask[neighbor] || visited[neighbor]) continue;
-        visited[neighbor] = 1;
-        queue.push(neighbor);
-      }
-    }
-
-    if (cells.length < 7) continue;
-    const outline = [];
-    for (const index of cells) {
-      const gx = index % columns;
-      const gy = Math.floor(index / columns);
-      const left = gx * step, top = gy * step;
-      const right = Math.min(width, left + step), bottom = Math.min(height, top + step);
-      if (!cellSet.has(index - columns)) outline.push([left, top, right, top]);
-      if (gx === columns - 1 || !cellSet.has(index + 1)) outline.push([right, top, right, bottom]);
-      if (gy === rows - 1 || !cellSet.has(index + columns)) outline.push([right, bottom, left, bottom]);
-      if (gx === 0 || !cellSet.has(index - 1)) outline.push([left, bottom, left, top]);
-    }
-    const x = minX * step, y = minY * step;
-    const right = Math.min(width, (maxX + 1) * step);
-    const bottom = Math.min(height, (maxY + 1) * step);
-    regions.push({
-      samples: cells.length,
-      bounds: { x, y, width: right - x, height: bottom - y },
-      center: { x: (x + right) / 2, y: (y + bottom) / 2 },
-      outline
-    });
+function drawTargetOverlay() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  clearVectorOutline();
+  if (!targetColor || video.readyState < 2 || !video.videoWidth) {
+    setCameraChips([]);
+    return;
   }
-  return regions.sort((a, b) => b.samples - a.samples);
-}
 
-function getShadeMatchRegions() {
-  if (!targetRgb || !video.videoWidth || !video.videoHeight) return [];
-  const width = 320;
-  const height = Math.max(1, Math.round(width * video.videoHeight / video.videoWidth));
+  const width = canvas.width || 320;
+  const height = canvas.height || Math.max(1, Math.round(width * video.videoHeight / video.videoWidth));
   if (samplingCanvas.width !== width || samplingCanvas.height !== height) {
     samplingCanvas.width = width;
     samplingCanvas.height = height;
   }
+  hueFindVectorOverlay?.setAttribute("viewBox", `0 0 ${width} ${height}`);
   samplingContext.drawImage(video, 0, 0, width, height);
-  const { data } = samplingContext.getImageData(0, 0, width, height);
-  const step = 4;
-  const columns = Math.ceil(width / step);
-  const rows = Math.ceil(height / step);
-  const mask = new Uint8Array(columns * rows);
-  const thresholdSquared = 82 * 82;
-
-  for (let y = 0; y < height; y += step) {
-    for (let x = 0; x < width; x += step) {
-      const index = (y * width + x) * 4;
-      const r = data[index], g = data[index + 1], b = data[index + 2];
-      if (classifyColor(r, g, b).name.toLowerCase() !== targetColor.toLowerCase()) continue;
-      const dr = r - targetRgb.r, dg = g - targetRgb.g, db = b - targetRgb.b;
-      if (dr * dr + dg * dg + db * db > thresholdSquared) continue;
-      mask[Math.floor(y / step) * columns + Math.floor(x / step)] = 1;
-    }
+  const frame = samplingContext.getImageData(0, 0, width, height);
+  const found = findSmoothColorContours(frame, {
+    color: targetColor, rgb: targetRgb, strictShade: targetStrictShade, minAreaFraction: .015,
+    relativeMinArea: .28, maxRegions: 6, whiteBalance: neutralGains
+  });
+  const allRegions = hueFindTracker.update(found, width, height);
+  if (pendingFocusPoint && !focusedContourId) {
+    const match = pickFocusedContour(allRegions, pendingFocusPoint, .19, width, height);
+    if (match) { focusedContourId = match.id; pendingFocusPoint = null; }
   }
-  return getBinaryRegions(mask, width, height, step).map((region) => ({ ...region, hex: rgbToHex(targetRgb) }));
-}
-
-function drawTargetOverlay() {
-  const color = latestColors.find((item) => item.name.toLowerCase() === targetColor.toLowerCase());
-  const regions = targetRgb ? getShadeMatchRegions() : (color?.regions || (color ? [{ bounds: color.bounds, center: getRegionCenter(color) }] : []));
-
+  const regions = focusedContourId
+    ? allRegions.filter(region => region.id === focusedContourId)
+    : pendingFocusPoint ? [] : allRegions.slice(0, 1);
   if (!regions.length) {
     setCameraChips([]);
-    setFeedback(findResult, `Looking for ${targetShade || targetColor}…`);
+    if (!focusedContourId && !pendingFocusPoint && !findSuggestionShown && currentMode === "find") {
+      findNoMatchFrames++;
+      // Wait for a few seconds of stable no-match evidence before suggesting another camera color.
+      if (findNoMatchFrames >= 27) {
+        findSuggestionShown = true;
+        const alternative = findClosestVisibleShade(frame, targetRgb || resolveFindShade(targetShade)?.rgb);
+        showFindSuggestions("not-visible", targetShade || targetColor, alternative ? [alternative] : []);
+      }
+    }
+    setFeedback(findResult, focusedContourId ? "Object temporarily lost. Keep it in view or tap another object."
+      : pendingFocusPoint ? "No matching region at that point. Tap the object again."
+      : `Looking for ${targetShade || targetColor}…${findSuggestionShown ? " Try a suggested alternative if needed." : ""}`);
     return;
   }
+  findNoMatchFrames = 0;
 
   const chips = [];
-  regions.slice(0, 8).forEach((region, index) => {
-    drawRegionOutline(region, "#f5e6a1");
+  for (const region of regions) {
+    drawSmoothTargetContour(region.points);
     chips.push({
-      key: `find-${index}`,
+      key: region.id,
       label: targetShade || targetColor,
       color: targetColor,
-      point: getRegionCenter(region),
-      hex: targetRgb ? rgbToHex(targetRgb) : region.hex
-    });
-  });
-  setCameraChips(showColorChips ? chips : []);
-  const region = regions[0];
-  setFeedback(findResult, `${targetShade || targetColor} detected · ${getApproximateRegion(region)}`);
-}
-
-function drawTaskGuidance() {
-  if (!activeTask || !canvas.width || !canvas.height) {
-    setCameraChips([]);
-    return;
-  }
-
-  const cues = Array.isArray(activeTask.visualCues) ? activeTask.visualCues : [];
-  const chips = [];
-  let targetPoint = null;
-  let destinationPoint = null;
-  let cueIndex = 0;
-
-  cues.forEach((cue) => {
-    const role = String(cue.role || "reference").toLowerCase();
-    const colorName = normalizeColorCategory(cue.color || (role === "target" ? activeTask.color : ""));
-    const colorGroup = colorName ? latestColors.find((item) => item.name.toLowerCase() === colorName) : null;
-    const regions = colorGroup?.regions || [];
-
-    if (regions.length) {
-      regions.slice(0, role === "target" ? 3 : 1).forEach((region, regionIndex) => {
-        const accent = role === "destination" ? "#f4d78c" : "#b9e9cf";
-        drawRegionOutline(region, accent);
-        const point = getRegionCenter(region);
-        chips.push({
-          key: `task-${cueIndex}-${regionIndex}`,
-          label: cue.label || cue.object || colorName,
-          color: colorName,
-          hex: region.hex,
-          point
-        });
-        if (role === "target" && !targetPoint) targetPoint = point;
-        if (role === "destination" && !destinationPoint) destinationPoint = point;
-      });
-    } else {
-      const zoneName = normalizeZone(`${cue.location || ""} ${cue.label || ""}`);
-      const point = cuePoint(cue) || (role === "target" ? { x: canvas.width * .5, y: canvas.height * .48 } : null);
-      if (point) {
-        const center = zoneName && role === "destination"
-          ? drawZoneGuide(zoneName)
-          : drawGuideBoxAt(point, cue.label, role === "destination" ? "#f4d78c" : "#b9e9cf");
-        if (role === "target" && !targetPoint) targetPoint = center;
-        if (role === "destination" && !destinationPoint) destinationPoint = center;
-      }
-      const fallbackPoint = point || { x: canvas.width * .5, y: role === "destination" ? canvas.height * .20 : canvas.height * .36 };
-      const cueLabel = cue.label || cue.object || cue.location || role;
-      chips.push({
-        key: `task-${cueIndex}`,
-        label: role === "target" && !colorName ? `Look for ${cueLabel}` : cueLabel,
-        color: role === "destination" ? "yellow" : colorName,
-        point: fallbackPoint
-      });
-    }
-    cueIndex += 1;
-  });
-
-  if (!cues.length && activeTask.normalizedColor) {
-    const colorGroup = latestColors.find((item) => item.name.toLowerCase() === activeTask.normalizedColor);
-    (colorGroup?.regions || []).slice(0, 3).forEach((region, index) => {
-      drawRegionOutline(region, "#b9e9cf");
-      const point = getRegionCenter(region);
-      if (!targetPoint) targetPoint = point;
-      chips.push({ key: `task-target-${index}`, label: activeTask.color || activeTask.normalizedColor, color: activeTask.normalizedColor, hex: region.hex, point });
+      point: region.center,
+      hex: targetRgb ? rgbToHex(targetRgb) : chipColors[targetColor.toLowerCase()]
     });
   }
-
-  const hasExplicitZoneCue = cues.some((cue) =>
-    String(cue.role || "").toLowerCase() === "destination" && normalizeZone(`${cue.location || ""} ${cue.label || ""}`)
-  );
-  if (activeTask.zoneKey && !hasExplicitZoneCue) {
-    const point = drawZoneGuide(activeTask.zoneKey);
-    if (!destinationPoint) destinationPoint = point;
-    chips.push({ key: "task-destination-zone", label: activeTask.zoneKey, color: "yellow", point });
-  }
-
-  if (targetPoint && destinationPoint) drawArrow(targetPoint, destinationPoint);
-  else if (targetPoint) drawArrow({ x: canvas.width * .5, y: canvas.height * .88 }, targetPoint);
-  else if (destinationPoint) drawArrow({ x: canvas.width * .5, y: canvas.height * .50 }, destinationPoint);
-
-  if (!chips.length) {
-    chips.push({ key: "task-summary", label: "Follow the steps", color: "green", point: { x: canvas.width * .5, y: canvas.height * .16 } });
-  }
   setCameraChips(showColorChips ? chips : []);
+  setFeedback(findResult, focusedContourId ? `Following one ${targetShade || targetColor} object`
+    : `${targetShade || targetColor} · showing the strongest match. Tap to follow another.`);
 }
 
 toggleCamBtn.addEventListener("click", async () => {
@@ -616,25 +563,59 @@ toggleCamBtn.addEventListener("click", async () => {
   toggleCamLabel.textContent = "Starting…";
 
   try {
+    const chosenCamera = cameraDeviceSelect?.value || "";
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" } },
+      video: {
+        ...(chosenCamera ? { deviceId: { exact: chosenCamera } } : { facingMode: { ideal: "environment" } }),
+        width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 }
+      },
       audio: false
     });
 
     video.srcObject = stream;
     await video.play();
+    if (cameraDeviceSelect && navigator.mediaDevices.enumerateDevices) {
+      try {
+        const cameras = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "videoinput");
+        const activeId = stream.getVideoTracks()[0]?.getSettings()?.deviceId || chosenCamera;
+        cameraDeviceSelect.replaceChildren();
+        const fallback = document.createElement("option"); fallback.value = ""; fallback.textContent = "Default";
+        cameraDeviceSelect.append(fallback);
+        cameras.forEach((device, index) => {
+          const option = document.createElement("option"); option.value = device.deviceId;
+          option.textContent = device.label || `Camera ${index + 1}`;
+          cameraDeviceSelect.append(option);
+        });
+        cameraDeviceSelect.value = cameras.some(d => d.deviceId === activeId) ? activeId : "";
+      } catch { /* Some browsers do not enumerate camera names. */ }
+    }
 
     streaming = true;
+    cameraFrame.classList.add("is-live-video");
+    // Native video remains smooth; the canvas is retained for HueFind/HueDo overlays.
+    canvas.width = 320;
+    canvas.height = Math.max(1, Math.round(320 * video.videoHeight / video.videoWidth));
+    steadyReading.reset();
+    hueSeeShadeIdentity.reset();
+    pinnedReferenceImage = null;
+    pinnedSample = null;
+    lastSampleTime = 0;
+    lastFrameAnalysis = 0;
+    hasScannedScene = false;
+    updatePinState();
     toggleCamBtn.disabled = false;
     toggleCamBtn.setAttribute("aria-pressed", "true");
     toggleCamBtn.classList.add("is-active");
     toggleCamLabel.textContent = "Stop camera";
     colorSelect.disabled = false;
-    taskBtn.disabled = Boolean(activeTask?.completed) || Boolean(activeTask?.canAutoVerify && !streaming);
+    scanSceneBtn.disabled = false;
+    snapshotBtn.disabled = false;
+    refreshGuideStatus();
     cameraPlaceholder.classList.add("is-hidden");
     setCameraStatus("Camera on", "live");
     detectedLayoutSignature = "__reset__";
     renderDetectedColors([]);
+    setFeedback(readingStatus, "Hover to explore colors. Click or tap to pin a reading.");
     processLoop();
   } catch (error) {
     console.error("Webcam access error:", error);
@@ -643,6 +624,12 @@ toggleCamBtn.addEventListener("click", async () => {
     toggleCamLabel.textContent = "Start camera";
     setCameraStatus("Camera access needed", "error");
   }
+});
+
+cameraDeviceSelect?.addEventListener("change", () => {
+  if (!streaming) return;
+  stopCamera();
+  toggleCamBtn.click();
 });
 
 function stopCamera() {
@@ -656,13 +643,29 @@ function stopCamera() {
 
   video.srcObject = null;
   streaming = false;
+  clearGeminiShade();
   latestColors = [];
   currentSample = null;
+  pinnedSample = null;
+  pinnedPosition = null;
+  pinnedReferenceImage = null;
+  steadyReading.reset();
+  hueSeeShadeIdentity.reset();
   lastSamplePosition = null;
+  lastSampleTime = 0;
+  lastFrameAnalysis = 0;
+  hueSeeRegionStabilizer.reset();
+  hueFindTracker.reset();
+  scanSceneRequested = false;
+  hasScannedScene = false;
+  scanSceneBtn.textContent = "Scan scene";
+  cameraFrame.classList.remove("is-live-video", "has-pinned-reading");
+  updatePinState();
   resetColorDetails();
   detectedLayoutSignature = "__reset__";
   renderDetectedColors([]);
   pointerIsDown = false;
+  pointerStart = null;
   pointerIsOverCanvas = false;
   keyboardSamplingActive = false;
   taskCheckFrames = 0;
@@ -672,63 +675,70 @@ function stopCamera() {
   toggleCamBtn.setAttribute("aria-pressed", "false");
   toggleCamBtn.classList.remove("is-active");
   toggleCamLabel.textContent = "Start camera";
-  colorSelect.disabled = true;
+  colorSelect.disabled = false;
+  scanSceneBtn.disabled = true;
+  snapshotBtn.disabled = true;
   sampleFindBtn.disabled = true;
-  taskBtn.disabled = Boolean(activeTask?.completed) || Boolean(activeTask?.canAutoVerify);
+  refreshGuideStatus();
 
   cameraPlaceholder.classList.remove("is-hidden");
   sampleIndicator.classList.remove("is-visible", "is-below");
+  sampleReticle.classList.remove("is-visible");
   setCameraChips([]);
+  clearVectorOutline();
   sampleSwatch.style.backgroundColor = "";
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   samplingContext.clearRect(0, 0, samplingCanvas.width, samplingCanvas.height);
 
   setCameraStatus("Camera off", "off");
   setFeedback(findResult, "Choose a target to begin.");
-  if (activeTask && !activeTask.completed) {
-    setFeedback(taskResult, activeTask.canAutoVerify ? "Start the camera to check placement." : "Start the camera to show visual cues.");
-  }
+  renderScene();
 }
 
-function processLoop() {
+function processLoop(time = 0) {
   if (!streaming) return;
 
   try {
-    const result = analyzeVideoFrame(video, canvas);
-    if (result?.ready) {
-      // analyzeVideoFrame draws the source frame to the canvas.
-      latestColors = result.colors || [];
-      renderDetectedColors(latestColors);
-
-      if (currentMode === "see") {
-        const chips = showColorChips
-          ? latestColors.flatMap((color) => (color.regions || []).map((region, index) => ({
-              key: `see-${color.name}-${index}`,
-              label: color.name,
-              color: color.name,
-              hex: region.hex,
-              point: getRegionCenter(region),
-              samples: region.samples
-            }))).sort((a, b) => b.samples - a.samples).slice(0, 10)
-          : [];
-        setCameraChips(chips);
-      } else if (currentMode === "find" && targetColor) {
-        drawTargetOverlay();
-      } else if (currentMode === "do" && activeTask) {
-        drawTaskGuidance();
-      } else {
-        setCameraChips([]);
+    if (currentMode === "do") {
+      // Track the seeded target/destination continuously while the webcam stays live.
+      if (time - hueDoLastFrame >= 80) {
+        hueDoLastFrame = time;
+        drawHueDoLiveOverlay();
       }
+    } else {
+      // Analyze color regions at a modest cadence, independently of fast cursor sampling.
+      // HueSee shows labels only; HueFind retains the original outlined target regions.
+      const shouldAnalyze = scanSceneRequested || time - lastFrameAnalysis >= (currentMode === "find" && targetColor ? FIND_INTERVAL_MS : FRAME_INTERVAL_MS);
 
-      if ((pointerIsOverCanvas || pointerIsDown || keyboardSamplingActive) && lastSamplePosition) {
-        const source = pointerIsDown ? "touch" : keyboardSamplingActive ? "keyboard" : "pointer";
-        sampleImagePoint(lastSamplePosition, source);
-      }
+      if (shouldAnalyze) {
+        lastFrameAnalysis = time;
+        const result = currentMode === "find" && targetColor && !scanSceneRequested
+          ? { ready: true, colors: latestColors }
+          : analyzeVideoFrame(video, analysisCanvas, hueSeeRegionStabilizer);
+        if (result?.ready) {
+          latestColors = result.colors || [];
+          if (scanSceneRequested) {
+            hasScannedScene = true;
+            renderDetectedColors(currentMode === "see"
+              ? latestColors.map(group => ({ ...group, name: group.regions?.[0]?.rgb
+                  ? describeDetailedShade(group.regions[0].rgb).name : group.name }))
+              : latestColors);
+            scanSceneBtn.textContent = "Scan scene";
+          }
+          scanSceneRequested = false;
 
-      if (activeTask?.canAutoVerify && !activeTask.completed && !taskCompletionPending) {
-        taskCheckFrames += 1;
-        if (taskCheckFrames % 5 === 0) verifyTaskFrame();
+          if (currentMode === "see") showHueSeeRegionLabels(latestColors);
+          else if (currentMode === "find" && targetColor) drawTargetOverlay();
+          else setCameraChips([]);
+        }
       }
+    }
+
+    if (currentMode !== "do" && !pinnedSample && (pointerIsOverCanvas || pointerIsDown || keyboardSamplingActive) &&
+        lastSamplePosition && time - lastSampleTime >= SAMPLE_INTERVAL_MS) {
+      const source = pointerIsDown ? "touch" : keyboardSamplingActive ? "keyboard" : "pointer";
+      sampleImagePoint(lastSamplePosition, source);
+      lastSampleTime = time;
     }
   } catch (error) {
     console.error("Camera frame processing error:", error);
@@ -777,11 +787,11 @@ function getStagePositionForImagePoint(x, y) {
   };
 }
 
-function sampleImagePoint(point, source = "pointer") {
-  if (!streaming || !video.videoWidth || !video.videoHeight || !point) return null;
+function sampleImagePoint(point, source = "pointer", { immediate = false } = {}) {
+  if (!streaming || !video.videoWidth || !video.videoHeight || !point || pinnedSample) return null;
 
   try {
-    const width = 320;
+    const width = 240;
     const height = Math.max(1, Math.round(width * video.videoHeight / video.videoWidth));
     if (samplingCanvas.width !== width || samplingCanvas.height !== height) {
       samplingCanvas.width = width;
@@ -791,12 +801,33 @@ function sampleImagePoint(point, source = "pointer") {
     samplingContext.drawImage(video, 0, 0, width, height);
     const pixelX = clamp(Math.floor(point.x * width), 0, width - 1);
     const pixelY = clamp(Math.floor(point.y * height), 0, height - 1);
-    const [r, g, b] = samplingContext.getImageData(pixelX, pixelY, 1, 1).data;
-    const color = classifyColor(r, g, b);
+    const patchSize = 7;
+    const x = Math.max(0, pixelX - 3);
+    const y = Math.max(0, pixelY - 3);
+    const patch = samplingContext.getImageData(
+      x, y, Math.min(patchSize, width - x), Math.min(patchSize, height - y)
+    );
+    const rgb = averagePixelRegion(patch);
+    const raw = classifyColor(rgb.r, rgb.g, rgb.b);
+    const sample = steadyReading.observe(raw, { immediate, position: point });
 
-    currentSample = { ...color, source, position: { x: point.x, y: point.y } };
+    if (!sample) return null;
+    const displayShade = hueSeeShadeIdentity.observe(sample.rgb, point, { immediate });
+    const nextSample = {
+      ...sample,
+      displayShade,
+      source,
+      position: { x: point.x, y: point.y }
+    };
+
+    const changed = !currentSample || currentSample.hex !== nextSample.hex || currentSample.name !== nextSample.name || currentSample.displayShade?.name !== nextSample.displayShade?.name;
+    currentSample = nextSample;
     lastSamplePosition = point;
-    renderSample(currentSample, point);
+    if (changed) {
+      renderSample(currentSample);
+      // Only change button state when pinning, not on every color sample.
+    }
+    moveSampleIndicator(point);
     return currentSample;
   } catch (error) {
     console.error("Color sample error:", error);
@@ -804,23 +835,185 @@ function sampleImagePoint(point, source = "pointer") {
   }
 }
 
-function renderSample(sample, point) {
-  sampleName.textContent = sample.name;
+function moveSampleIndicator(point) {
+  if (!point || pinnedSample) return;
+  const width = cameraFrame.clientWidth;
+  const height = cameraFrame.clientHeight;
+  const halfWidth = (sampleIndicator.offsetWidth || 175) / 2 + 8;
+  const left = clamp(point.stageX * width, halfWidth, Math.max(halfWidth, width - halfWidth));
+  const top = clamp(point.stageY * height, 15, Math.max(15, height - 15));
+  sampleIndicator.style.left = `${left}px`;
+  sampleIndicator.style.top = `${top}px`;
+  sampleIndicator.classList.toggle("is-below", point.stageY < .25);
+  sampleIndicator.classList.add("is-visible");
+  sampleReticle.style.left = `${point.stageX * 100}%`;
+  sampleReticle.style.top = `${point.stageY * 100}%`;
+  sampleReticle.classList.add("is-visible");
+}
+
+function renderSample(sample) {
+  sampleName.textContent = (sample.displayShade || describeDetailedShade(sample.rgb)).name;
+  sampleHex.textContent = sample.hex;
+  const { r, g, b } = sample.rgb;
+  sampleRgb.textContent = `RGB ${r}, ${g}, ${b}`;
   sampleSwatch.style.backgroundColor = sample.hex;
   renderColorDetails(sample);
-
-  const frameRect = cameraFrame.getBoundingClientRect();
-  const indicatorWidth = sampleIndicator.offsetWidth || 120;
-  const horizontalPadding = indicatorWidth / 2 + 8;
-  const left = clamp(point.stageX * frameRect.width, horizontalPadding, frameRect.width - horizontalPadding);
-
-  sampleIndicator.style.left = `${left}px`;
-  sampleIndicator.style.top = `${point.stageY * frameRect.height}px`;
-  sampleIndicator.classList.toggle("is-below", point.stageY < 0.18);
-  sampleIndicator.classList.add("is-visible");
-  sampleFindBtn.disabled = !streaming || ["Unknown", "White", "Gray"].includes(sample.name);
-  saveColorBtn.disabled = !streaming || ["Unknown", "White", "Gray"].includes(sample.name);
+  sampleFindBtn.disabled = false;
 }
+
+function updatePinState() {
+  const pinned = Boolean(pinnedSample);
+  cameraFrame.classList.toggle("has-pinned-reading", pinned);
+  pinColorBtn.disabled = !streaming || (!pinned && !currentSample);
+  pinColorBtn.textContent = pinned ? "Unpin reading" : "Pin reading";
+  pinColorBtn.setAttribute("aria-pressed", String(pinned));
+  saveColorBtn.disabled = !streaming || !pinned || pinnedSample?.name === "Unknown";
+  refineShadeBtn.disabled = !streaming || !pinned || geminiShadeBusy;
+  refineShadeBtn.textContent = geminiShadeBusy ? "Checking shade…" : "Refine shade with Gemini";
+  setFeedback(readingStatus, pinned
+    ? `Pinned ${(pinnedSample.displayShade || describeDetailedShade(pinnedSample.rgb)).name} (${pinnedSample.hex}). Recheck with Gemini under different lighting.`
+    : "Hover to explore. Click or tap to pin the color you want to keep.");
+}
+
+function pinReading(point = lastSamplePosition) {
+  if (!streaming) return;
+  clearGeminiShade();
+  if (pinnedSample) {
+    pinnedSample = null;
+    pinnedPosition = null;
+    pinnedReferenceImage = null;
+    hueSeeShadeIdentity.reset();
+    steadyReading.reset();
+    if (currentSample) renderSample(currentSample);
+    sampleIndicator.classList.remove("is-visible");
+    sampleReticle.classList.remove("is-visible");
+    updatePinState();
+    return;
+  }
+  if (point) sampleImagePoint(point, "pin", { immediate: true });
+  if (!currentSample) return;
+  // Keep a reference crop from pin time for optional lighting/surface comparison.
+  try { pinnedReferenceImage = capturePinnedShadeCrop(point || currentSample.position); }
+  catch { pinnedReferenceImage = null; }
+  pinnedSample = {
+    name: currentSample.name,
+    hex: currentSample.hex,
+    rgb: { ...currentSample.rgb },
+    displayShade: currentSample.displayShade || describeDetailedShade(currentSample.rgb),
+    position: { ...currentSample.position },
+    source: "pin"
+  };
+  pinnedPosition = point ? { ...point } : null;
+  currentSample = pinnedSample;
+  if (pinnedPosition) movePinnedIndicator(pinnedPosition);
+  sampleFindBtn.disabled = pinnedSample.name === "Unknown";
+  updatePinState();
+}
+
+function movePinnedIndicator(point) {
+  // Reuse the same visual cursor, but prevent further hover sampling until unpinned.
+  const width = cameraFrame.clientWidth;
+  const height = cameraFrame.clientHeight;
+  const halfWidth = (sampleIndicator.offsetWidth || 175) / 2 + 8;
+  sampleIndicator.style.left = `${clamp(point.stageX * width, halfWidth, Math.max(halfWidth, width - halfWidth))}px`;
+  sampleIndicator.style.top = `${point.stageY * height}px`;
+  sampleIndicator.classList.toggle("is-below", point.stageY < .25);
+  sampleIndicator.classList.add("is-visible");
+  sampleReticle.style.left = `${point.stageX * 100}%`;
+  sampleReticle.style.top = `${point.stageY * 100}%`;
+  sampleReticle.classList.add("is-visible");
+}
+
+// Gemini is opt-in: only small still-image crops are sent after the user clicks the button.
+function clearGeminiShade() {
+  geminiShadeRequestId += 1;
+  geminiShadeAbort?.abort();
+  geminiShadeAbort = null;
+  geminiShadeBusy = false;
+  geminiShade = null;
+}
+
+function capturePinnedShadeCrop(point) {
+  if (!streaming || !video.videoWidth || !video.videoHeight || !point) {
+    throw new Error("Start the camera and pin a color first.");
+  }
+  const side = Math.min(video.videoWidth, video.videoHeight) * .27;
+  const sx = clamp(point.x * video.videoWidth - side / 2, 0, video.videoWidth - side);
+  const sy = clamp(point.y * video.videoHeight - side / 2, 0, video.videoHeight - side);
+  const crop = document.createElement("canvas");
+  crop.width = 224;
+  crop.height = 224;
+  crop.getContext("2d").drawImage(video, sx, sy, side, side, 0, 0, 224, 224);
+  return { mimeType: "image/jpeg", data: crop.toDataURL("image/jpeg", .78).split(",")[1] };
+}
+
+function captureCurrentPinnedRgb() {
+  const point = pinnedPosition || pinnedSample?.position;
+  if (!point || !streaming || !video.videoWidth || !video.videoHeight) return null;
+  const image = document.createElement("canvas");
+  image.width = 224; image.height = 224;
+  const imageContext = image.getContext("2d", { willReadFrequently: true });
+  imageContext.drawImage(video, 0, 0, 224, 224);
+  const cx = clamp(Math.floor(point.x * 224), 4, 219);
+  const cy = clamp(Math.floor(point.y * 224), 4, 219);
+  return averagePixelRegion(imageContext.getImageData(cx - 4, cy - 4, 9, 9));
+}
+
+refineShadeBtn.addEventListener("click", async () => {
+  if (!pinnedSample || geminiShadeBusy || currentMode !== "see") return;
+  const reading = pinnedSample;
+  const requestId = ++geminiShadeRequestId;
+  geminiShadeBusy = true;
+  geminiShadeAbort = new AbortController();
+  let finalFeedback = "";
+  updatePinState();
+  setFeedback(readingStatus, "Gemini is comparing your pinned shade with the current camera lighting. Two small photo crops may be sent to Google.");
+  try {
+    const image = capturePinnedShadeCrop(pinnedPosition || reading.position);
+    const currentRgb = captureCurrentPinnedRgb();
+    const response = await fetch("/api/shades", {
+      method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image, rgb: reading.rgb, referenceImage: pinnedReferenceImage,
+        currentRgb, previousShadeName: geminiShade?.name || "" }),
+      signal: geminiShadeAbort.signal
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || `Gemini unavailable (${response.status}).`);
+    const suggestion = sanitizeGeminiShade({ shadeName: result.name, note: result.note });
+    if (!suggestion) throw new Error("Gemini did not return a usable shade name.");
+    if (requestId !== geminiShadeRequestId || pinnedSample !== reading) return;
+    if (result.sameSurface !== "no") {
+      geminiShade = { ...suggestion, hex: reading.hex, confidence: result.confidence,
+        sameSurface: result.sameSurface, lightingChanged: result.lightingChanged,
+        identityHeld: result.identityHeld, needsConfirmation: result.needsConfirmation };
+    }
+    renderSample(reading);
+    finalFeedback = result.sameSurface === "no"
+      ? `Gemini sees a different surface; the original pinned shade remains ${(reading.displayShade || describeDetailedShade(reading.rgb)).name}. Re-pin the intended object if it moved.`
+      : `Gemini suggests ${suggestion.name} (${result.confidence || "low"} confidence). ${result.identityHeld ? "Shade identity retained across lighting. " : ""}${result.sameSurface === "uncertain" ? "Object identity uncertain; verify the surface. " : ""}${suggestion.note}`;
+  } catch (error) {
+    if (requestId === geminiShadeRequestId && pinnedSample === reading) {
+      finalFeedback = error.name === "AbortError"
+        ? "Gemini shade check cancelled; local shade detection still works."
+        : `${error.message} Local shade detection still works.`;
+    }
+  } finally {
+    if (requestId === geminiShadeRequestId) {
+      geminiShadeBusy = false;
+      geminiShadeAbort = null;
+      updatePinState();
+      if (finalFeedback) setFeedback(readingStatus, finalFeedback);
+    }
+  }
+});
+
+pinColorBtn.addEventListener("click", () => pinReading());
+scanSceneBtn.addEventListener("click", () => {
+  if (!streaming) return;
+  scanSceneRequested = true;
+  scanSceneBtn.textContent = "Scanning…";
+});
 
 function rgbToHsl(r, g, b) {
   const red = r / 255;
@@ -852,10 +1045,11 @@ function rgbToHsl(r, g, b) {
 }
 
 function getPlainLanguageDescription(sample, hsl) {
-  if (sample.name === "Unknown") return "Outside supported categories";
-  if (sample.name === "Black") return "Very dark neutral";
-  if (sample.name === "White") return "Very light neutral";
-  if (sample.name === "Gray") return "Low-saturation neutral";
+  const shade = sample.displayShade || describeDetailedShade(sample.rgb);
+  if (shade.name === "Unknown") return "Outside supported categories";
+  if (shade.family === "Black") return "Very dark neutral";
+  if (shade.family === "White") return "Very light neutral";
+  if (shade.family === "Gray") return "Low-saturation neutral";
 
   const lightness = hsl.l < 20 ? "Very dark" :
     hsl.l < 40 ? "Dark" :
@@ -864,7 +1058,7 @@ function getPlainLanguageDescription(sample, hsl) {
   const saturation = hsl.s < 20 ? "muted" :
     hsl.s < 45 ? "soft" :
     hsl.s < 70 ? "moderate" : "vivid";
-  return `${lightness}, ${saturation} ${sample.name.toLowerCase()}`;
+  return `${lightness}, ${saturation} ${shade.name.toLowerCase()}`;
 }
 
 function renderColorDetails(sample) {
@@ -872,14 +1066,19 @@ function renderColorDetails(sample) {
   const hsl = rgbToHsl(r, g, b);
 
   colorPreview.style.backgroundColor = sample.hex;
-  colorNameDisplay.textContent = sample.name;
-  colorDescription.textContent = getPlainLanguageDescription(sample, hsl);
+  const shade = sample.displayShade || describeDetailedShade(sample.rgb);
+  colorNameDisplay.textContent = shade.name;
+  const nearest = closestReferenceShade(sample.rgb);
+  colorDescription.textContent = "Camera estimate: " + getPlainLanguageDescription(sample, hsl) +
+    (nearest ? ` · closest CSS shade: ${nearest}` : "") +
+    (shade.lightingHeld ? " · Shade identity retained through a lighting change; HEX/RGB are measured values" : "") +
+    (geminiShade?.hex === sample.hex ? ` · Gemini suggests: ${geminiShade.name} (${geminiShade.confidence || "low"} confidence)${geminiShade.note ? ` · ${geminiShade.note}` : ""}${geminiShade.needsConfirmation ? " · Verify under neutral lighting" : ""}` : "");
   colorHex.textContent = sample.hex;
   colorRgb.textContent = `(${r}, ${g}, ${b})`;
   colorHsl.textContent = `(${hsl.h}°, ${hsl.s}%, ${hsl.l}%)`;
 
   speakDetailsBtn.disabled = false;
-  saveColorBtn.disabled = ["Unknown", "White", "Gray"].includes(sample.name);
+  pinColorBtn.disabled = false;
 }
 
 function resetColorDetails() {
@@ -890,15 +1089,11 @@ function resetColorDetails() {
   colorRgb.textContent = "—";
   colorHsl.textContent = "—";
   speakDetailsBtn.disabled = true;
+  pinColorBtn.disabled = true;
   saveColorBtn.disabled = true;
   setFeedback(saveColorStatus, "");
 }
 
-function getSpokenColorDetails(sample) {
-  const { r, g, b } = sample.rgb;
-  const hsl = rgbToHsl(r, g, b);
-  return `${sample.name}. Hex ${sample.hex}. RGB ${r}, ${g}, ${b}. HSL ${hsl.h} degrees, ${hsl.s} percent saturation, ${hsl.l} percent lightness.`;
-}
 
 function getApproximateRegion(color) {
   const bounds = color.bounds;
@@ -922,7 +1117,7 @@ function renderDetectedColors(colors) {
     if (!streaming) {
       const empty = document.createElement("li");
       empty.className = "detected-empty";
-      empty.textContent = "Start the camera to scan the scene.";
+      empty.textContent = "Use Scan scene to analyze visible colors.";
       detectedColorsList.append(empty);
       return;
     }
@@ -930,7 +1125,7 @@ function renderDetectedColors(colors) {
     if (colors.length === 0) {
       const empty = document.createElement("li");
       empty.className = "detected-empty";
-      empty.textContent = "No supported color groups in view.";
+      empty.textContent = hasScannedScene ? "No prominent color groups detected. Move closer and scan again." : "Choose Scan scene for an overview.";
       detectedColorsList.append(empty);
       return;
     }
@@ -966,24 +1161,34 @@ function renderDetectedColors(colors) {
   }
 }
 
-function sampleFromPointer(event) {
+function sampleFromPointer(event, { immediate = false } = {}) {
+  if (showingScene()) return;
+  if (!streaming || pinnedSample) return null;
   const point = getImagePoint(event.clientX, event.clientY);
-  if (!point) {
-    lastSamplePosition = null;
-    sampleIndicator.classList.remove("is-visible");
-    return null;
-  }
-
+  if (!point) return null;
+  const previous = lastSamplePosition;
+  const movedFar = Boolean(previous && Math.hypot(point.x - previous.x, point.y - previous.y) > .13);
   keyboardPosition = { x: point.x, y: point.y };
-  sampleImagePoint(point, event.pointerType === "touch" ? "touch" : "pointer");
+  lastSamplePosition = point;
+  moveSampleIndicator(point);
+  const now = performance.now();
+  if (immediate || now - lastSampleTime >= SAMPLE_INTERVAL_MS) {
+    sampleImagePoint(point, event.pointerType === "touch" ? "touch" : "pointer", { immediate: immediate || movedFar });
+    lastSampleTime = now;
+  }
   return point;
 }
 
 canvas.addEventListener("pointerenter", (event) => {
-  if (event.pointerType === "mouse") pointerIsOverCanvas = true;
+  if (currentMode !== "see") return;
+  if (event.pointerType === "mouse") {
+    pointerIsOverCanvas = true;
+    sampleFromPointer(event);
+  }
 });
 
 canvas.addEventListener("pointermove", (event) => {
+  if (currentMode !== "see" || pinnedSample) return;
   if (event.pointerType === "mouse") {
     pointerIsOverCanvas = Boolean(sampleFromPointer(event));
   } else if (pointerIsDown) {
@@ -992,78 +1197,109 @@ canvas.addEventListener("pointermove", (event) => {
 });
 
 canvas.addEventListener("pointerdown", (event) => {
-  if (!streaming) return;
+  if (!streaming || !["see", "find"].includes(currentMode)) return;
+  if (currentMode === "find") {
+    const point = getImagePoint(event.clientX, event.clientY);
+    if (point) focusHueFindAt(point);
+    if (event.pointerType !== "mouse") event.preventDefault();
+    return;
+  }
   pointerIsDown = true;
+  pointerStart = { x: event.clientX, y: event.clientY, time: performance.now() };
   keyboardSamplingActive = false;
   canvas.focus({ preventScroll: true });
   if (event.pointerType !== "mouse") event.preventDefault();
   if (canvas.setPointerCapture) canvas.setPointerCapture(event.pointerId);
-  sampleFromPointer(event);
+  sampleFromPointer(event, { immediate: true });
 });
 
 function finishPointerSample(event) {
+  if (currentMode !== "see") return;
+  const start = pointerStart;
   pointerIsDown = false;
+  pointerStart = null;
   if (event?.pointerType !== "mouse") pointerIsOverCanvas = false;
-  if (currentSample) announceSample(currentSample);
+  const isTap = start && Math.hypot(event.clientX - start.x, event.clientY - start.y) <= 13 &&
+    performance.now() - start.time < 520;
+  if (isTap) {
+    if (!pinnedSample) sampleFromPointer(event, { immediate: true });
+    pinReading(lastSamplePosition);
+  } else if (currentSample && !pinnedSample) {
+    // Dragging explores the view; it does not accidentally pin.
+    sampleIndicator.classList.remove("is-visible");
+    sampleReticle.classList.remove("is-visible");
+  }
 }
 
 canvas.addEventListener("pointerup", finishPointerSample);
-canvas.addEventListener("pointercancel", finishPointerSample);
+canvas.addEventListener("pointercancel", () => { pointerIsDown = false; pointerStart = null; });
 
 canvas.addEventListener("pointerleave", (event) => {
   if (event.pointerType === "mouse" && !pointerIsDown) {
     pointerIsOverCanvas = false;
-    lastSamplePosition = null;
-    sampleIndicator.classList.remove("is-visible");
+    if (!pinnedSample) {
+      lastSamplePosition = null;
+      sampleIndicator.classList.remove("is-visible");
+      sampleReticle.classList.remove("is-visible");
+      steadyReading.reset();
+    }
   }
 });
 
 canvas.addEventListener("focus", () => {
-  if (!streaming || pointerIsDown) return;
-  keyboardPosition = { x: 0.5, y: 0.5 };
+  if (!streaming || !["see", "find"].includes(currentMode) || pointerIsDown || pinnedSample) return;
+  keyboardPosition = { x: .5, y: .5 };
   keyboardSamplingActive = true;
-  sampleImagePoint({
-    ...keyboardPosition,
-    ...getStagePositionForImagePoint(keyboardPosition.x, keyboardPosition.y)
-  }, "keyboard");
+  const point = { ...keyboardPosition, ...getStagePositionForImagePoint(keyboardPosition.x, keyboardPosition.y) };
+  lastSamplePosition = point;
+  sampleImagePoint(point, "keyboard", { immediate: true });
 });
 
 canvas.addEventListener("keydown", (event) => {
-  if (!streaming) return;
+  if (!streaming || !["see", "find"].includes(currentMode)) return;
+  if (event.key === "Escape" && pinnedSample) {
+    event.preventDefault();
+    pinReading();
+    return;
+  }
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    if (currentMode === "find") focusHueFindAt({ ...keyboardPosition, ...getStagePositionForImagePoint(keyboardPosition.x, keyboardPosition.y) });
+    else pinReading();
+    return;
+  }
+  if (pinnedSample) return;
 
-  const step = event.shiftKey ? 0.1 : 0.025;
+  const step = event.shiftKey ? .10 : .025;
   let moved = true;
-
   switch (event.key) {
     case "ArrowLeft": keyboardPosition.x = clamp(keyboardPosition.x - step, 0, 1); break;
     case "ArrowRight": keyboardPosition.x = clamp(keyboardPosition.x + step, 0, 1); break;
     case "ArrowUp": keyboardPosition.y = clamp(keyboardPosition.y - step, 0, 1); break;
     case "ArrowDown": keyboardPosition.y = clamp(keyboardPosition.y + step, 0, 1); break;
-    case "Enter":
-    case " ":
-      event.preventDefault();
-      if (currentSample) announceSample(currentSample);
-      return;
     default: moved = false;
   }
-
   if (moved) {
     event.preventDefault();
     keyboardSamplingActive = true;
-    sampleImagePoint({
-      ...keyboardPosition,
-      ...getStagePositionForImagePoint(keyboardPosition.x, keyboardPosition.y)
-    }, "keyboard");
+    steadyReading.reset();
+    const point = { ...keyboardPosition, ...getStagePositionForImagePoint(keyboardPosition.x, keyboardPosition.y) };
+    lastSamplePosition = point;
+    sampleImagePoint(point, "keyboard", { immediate: true });
   }
 });
 
 canvas.addEventListener("blur", () => {
   keyboardSamplingActive = false;
-  if (!pointerIsOverCanvas && !pointerIsDown) sampleIndicator.classList.remove("is-visible");
+  if (!pinnedSample && !pointerIsOverCanvas && !pointerIsDown) {
+    sampleIndicator.classList.remove("is-visible");
+    sampleReticle.classList.remove("is-visible");
+  }
 });
 
 function announceSample(sample) {
-  speak(getSpokenColorDetails(sample));
+  const shadeName = (sample.displayShade || describeDetailedShade(sample.rgb)).name;
+  speak(shadeName);
 }
 
 speakDetailsBtn.addEventListener("click", () => {
@@ -1071,19 +1307,41 @@ speakDetailsBtn.addEventListener("click", () => {
 });
 
 saveColorBtn.addEventListener("click", async () => {
-  if (!currentSample || saveColorBtn.disabled) return;
+  if (!pinnedSample || saveColorBtn.disabled) return;
   saveColorBtn.disabled = true;
+  const detailedName = (pinnedSample.displayShade || describeDetailedShade(pinnedSample.rgb)).name;
+  const snapshot = { ...pinnedSample, rgb: { ...pinnedSample.rgb }, shade: `${detailedName} ${pinnedSample.hex}` };
   setFeedback(saveColorStatus, "Saving…");
   try {
-    await saveColor(currentSample);
-    setFeedback(saveColorStatus, `${currentSample.name} saved to HueMemory.`);
-    speak(`${currentSample.name} saved to your color palette.`);
+    await saveColor(snapshot);
+    setFeedback(saveColorStatus, `${detailedName} ${snapshot.hex} saved to HueMemory.`);
+    speak(`${detailedName} saved to your color palette.`);
   } catch (error) {
     setFeedback(saveColorStatus, error.message || "Could not save this color.");
   } finally {
-    saveColorBtn.disabled = !currentSample || ["Unknown", "White", "Gray"].includes(currentSample.name);
+    saveColorBtn.disabled = !pinnedSample || pinnedSample.name === "Unknown";
   }
 });
+
+function applyTheme(theme, persist = false) {
+  activeTheme = theme === "dark" ? "dark" : "light";
+  document.body.dataset.theme = activeTheme;
+  document.documentElement.style.colorScheme = activeTheme;
+  const dark = activeTheme === "dark";
+  if (themeToggle) {
+    themeToggle.setAttribute("aria-pressed", String(dark));
+    themeToggle.setAttribute("aria-label", dark ? "Turn dark mode off" : "Turn dark mode on");
+    themeToggle.querySelector("span:first-child").textContent = dark ? "☀" : "☾";
+    themeToggle.querySelector("span:last-child").textContent = dark ? "Light mode" : "Dark mode";
+  }
+  const themeMeta = document.querySelector('meta[name="theme-color"]');
+  if (themeMeta) themeMeta.content = dark ? "#171d1b" : "#f7f4ec";
+  if (persist) {
+    try { localStorage.setItem("hue-theme", activeTheme); } catch { /* storage disabled */ }
+  }
+}
+applyTheme(activeTheme);
+themeToggle?.addEventListener("click", () => applyTheme(activeTheme === "dark" ? "light" : "dark", true));
 
 contrastToggle.addEventListener("click", () => {
   const enabled = document.body.classList.toggle("high-contrast");
@@ -1100,142 +1358,655 @@ textSizeToggle.addEventListener("click", () => {
 colorChipToggle.addEventListener("click", () => {
   showColorChips = !showColorChips;
   colorChipToggle.setAttribute("aria-pressed", String(showColorChips));
-  colorChipToggle.setAttribute("aria-label", showColorChips ? "Hide color chips" : "Show color chips");
-  colorChipToggle.title = showColorChips ? "Hide color chips" : "Show color chips";
-  if (!showColorChips) setCameraChips([]);
+  updateColorChipToggleCopy();
+  if (currentMode === "see") showHueSeeRegionLabels(latestColors);
+  else if (currentMode === "do" && !streaming) renderScene();
+  else if (!showColorChips) setCameraChips([]);
+});
+
+function closeFindSuggestions() {
+  if (findSuggestionDialog?.open) findSuggestionDialog.close();
+}
+
+function showFindSuggestions(reason, requested, choices = []) {
+  if (!findSuggestionDialog) return;
+  findSuggestionOptions.replaceChildren();
+  const unknown = reason === "unknown";
+  findSuggestionTitle.textContent = unknown ? "Shade name not recognized" : "That shade isn't visible yet";
+  findSuggestionText.textContent = unknown
+    ? `We couldn't match “${requested}” to a known shade name. Choose a similar catalog name, or try a HEX value.`
+    : choices.length
+      ? `No stable outline for “${requested}” was found. Here's the closest substantial color area detected in the live camera. It's only an approximate match.`
+      : `No substantial “${requested}” region was found. Move the camera, improve lighting, or try another color name.`;
+  for (const choice of choices) {
+    const option = document.createElement("button");
+    option.type = "button";
+    option.className = "hue-find-suggestion-option";
+    const swatch = document.createElement("span");
+    swatch.className = "hue-find-suggestion-swatch";
+    swatch.style.backgroundColor = choice.hex;
+    swatch.setAttribute("aria-hidden", "true");
+    const copy = document.createElement("span");
+    const title = document.createElement("strong");
+    title.textContent = choice.name;
+    const details = document.createElement("small");
+    details.textContent = unknown ? `Catalog shade · ${choice.hex}`
+      : `Closest camera color · ${choice.hex}${choice.distance > 25 ? " · weak similarity" : ""}`;
+    copy.append(title, details);
+    option.append(swatch, copy);
+    option.addEventListener("click", () => {
+      closeFindSuggestions();
+      setFindTarget(choice.name, true, unknown ? null : { rgb: choice.rgb, shade: choice.name });
+    });
+    findSuggestionOptions.append(option);
+  }
+  if (!choices.length && unknown) {
+    const help = document.createElement("p");
+    help.textContent = "Try a simpler shade name like olive green, a specific HEX (#9CAF88), or RGB (156, 175, 136).";
+    findSuggestionOptions.append(help);
+  }
+  if (!findSuggestionDialog.open) findSuggestionDialog.showModal();
+}
+findSuggestionClose?.addEventListener("click", closeFindSuggestions);
+findSuggestionKeep?.addEventListener("click", closeFindSuggestions);
+findSuggestionDialog?.addEventListener("click", event => {
+  if (event.target === findSuggestionDialog) closeFindSuggestions();
 });
 
 function setFindTarget(value, shouldSpeak = true, colorReference = null) {
-  const normalized = normalizeColorCategory(value);
-  targetColor = normalized;
-  targetRgb = colorReference?.rgb || null;
-  targetShade = colorReference?.shade || "";
-  colorSelect.value = normalized;
-  if (!normalized) {
+  const text = String(value || "").trim();
+  let shade = resolveFindShade(text);
+  if (colorReference?.rgb && [colorReference.rgb.r, colorReference.rgb.g, colorReference.rgb.b].every(Number.isFinite)) {
+    const sampled = colorReference.rgb;
+    const detail = describeDetailedShade(sampled);
+    shade = { ok: true, name: colorReference.shade || detail.name, rgb: sampled,
+      family: detail.family, broad: false };
+  }
+  if (text && !shade.ok) {
+    targetColor = "";
     targetRgb = null;
     targetShade = "";
-    setFeedback(findResult, "Choose a target to begin.");
+    targetStrictShade = false;
+    clearVectorOutline();
+    setCameraChips([]);
+    hueFindTracker.reset();
+    findSuggestionShown = true;
+    findNoMatchFrames = 0;
+    colorSelect.value = text;
+    showFindSuggestions("unknown", text, shade.suggestions || suggestFindShadeNames(text));
+    setFeedback(findResult, `“${text}” isn't in the shade catalog. Select a suggestion or enter a HEX value.`);
     return;
   }
-  const label = targetShade || normalized;
+  targetColor = shade.ok ? shade.family.toLowerCase() : "";
+  targetRgb = shade.ok && !shade.broad ? shade.rgb : null;
+  targetStrictShade = Boolean(shade.ok && !shade.broad);
+  targetShade = shade.ok ? shade.name : "";
+  colorSelect.value = shade.ok ? (colorReference?.shade || shade.name) : "";
+  findNoMatchFrames = 0;
+  findSuggestionShown = false;
+  hueFindTracker.reset();
+  focusedContourId = null;
+  pendingFocusPoint = null;
+  clearVectorOutline();
+  setCameraChips([]);
+  if (!targetColor) {
+    targetRgb = null;
+    targetShade = "";
+    setFeedback(findResult, "Type a color or shade name to begin.");
+    return;
+  }
+  const label = targetShade || targetColor;
   setFeedback(findResult, streaming ? `Looking for ${label}…` : `Target set: ${label}. Start the camera to find it.`);
   if (shouldSpeak) speak(`Finding ${label}`);
 }
 
-colorSelect.addEventListener("change", (event) => setFindTarget(event.target.value));
+// A point selects a particular real-world region instead of every patch of that color.
+function focusHueFindAt(point) {
+  if (!streaming || !point || video.readyState < 2) return;
+  if (!targetColor) {
+    // Read directly from the camera; a color pinned earlier in HueSee must not
+    // block the selection of a new HueFind target.
+    const width = 320, height = Math.max(1, Math.round(width * video.videoHeight / video.videoWidth));
+    samplingCanvas.width = width; samplingCanvas.height = height;
+    samplingContext.drawImage(video, 0, 0, width, height);
+    const x = clamp(Math.round(point.x * width) - 4, 0, Math.max(0, width - 9));
+    const y = clamp(Math.round(point.y * height) - 4, 0, Math.max(0, height - 9));
+    const rgb = averagePixelRegion(samplingContext.getImageData(x, y, 9, 9));
+    const sample = describeDetailedShade(rgb);
+    if (sample.family === "Unknown") {
+      setFeedback(findResult, "Choose a color first, or tap an object."); return;
+    }
+    setFindTarget(sample.name, false, { rgb, shade: sample.name });
+  }
+  focusedContourId = null;
+  pendingFocusPoint = { x: point.x * (canvas.width || 320), y: point.y * (canvas.height || 240) };
+  hueFindTracker.reset();
+  setFeedback(findResult, `Selecting a ${targetShade || targetColor} region…`);
+  drawTargetOverlay();
+}
+
+focusResetBtn?.addEventListener("click", () => {
+  focusedContourId = null;
+  pendingFocusPoint = null;
+  targetColor = "";
+  targetRgb = null;
+  targetShade = "";
+  targetStrictShade = false;
+  findNoMatchFrames = 0;
+  findSuggestionShown = false;
+  hueFindTracker.reset();
+  colorSelect.value = "";
+  closeFindSuggestions();
+  clearVectorOutline();
+  setCameraChips([]);
+  setFeedback(findResult, "Color cleared. Search for another shade or tap an object in the camera.");
+});
+calibrateBtn?.addEventListener("click", () => {
+  if (neutralGains) {
+    neutralGains = null; calibrateBtn.textContent = "Calibrate from white card";
+    calibrationStatus.textContent = "Calibration cleared. Camera uses its default color response.";
+    hueFindTracker.reset(); focusedContourId = null; pendingFocusPoint = null;
+    return;
+  }
+  if (!streaming || video.readyState < 2) {
+    calibrationStatus.textContent = "Start the camera, then hold a white card at its center."; return;
+  }
+  const width = 320, height = Math.round(width * video.videoHeight / video.videoWidth);
+  samplingCanvas.width = width; samplingCanvas.height = height;
+  samplingContext.drawImage(video, 0, 0, width, height);
+  const neutral = neutralReferenceFromCenter(samplingContext.getImageData(0, 0, width, height));
+  const gains = calculateNeutralGains(neutral || {});
+  if (!gains) {
+    calibrationStatus.textContent = "No usable neutral card detected at center. Try plain white or gray paper with even light.";
+    return;
+  }
+  neutralGains = gains; calibrateBtn.textContent = "Reset lighting calibration";
+  calibrationStatus.textContent = "Neutral-card correction on for HueFind matching. Camera image and saved HEX remain unaltered.";
+  hueFindTracker.reset(); focusedContourId = null; pendingFocusPoint = null;
+});
+
+findShadeBtn?.addEventListener("click", () => setFindTarget(colorSelect.value));
+colorSelect.addEventListener("keydown", event => {
+  if (event.key === "Enter") { event.preventDefault(); setFindTarget(colorSelect.value); }
+});
 sampleFindBtn.addEventListener("click", () => {
-  if (currentSample) setFindTarget(currentSample.name, true, { ...currentSample, shade: currentSample.name });
+  if (currentSample) {
+    const shadeName = (currentSample.displayShade || describeDetailedShade(currentSample.rgb)).name;
+    setFindTarget(shadeName, true, { ...currentSample, shade: shadeName });
+  }
 });
 clearFindBtn.addEventListener("click", () => {
   targetColor = "";
   targetRgb = null;
   targetShade = "";
+  targetStrictShade = false;
+  findNoMatchFrames = 0;
+  findSuggestionShown = false;
+  closeFindSuggestions();
   colorSelect.value = "";
-  setFeedback(findResult, "Choose a target to begin.");
+  clearVectorOutline();
+  focusedContourId = null; pendingFocusPoint = null;
+  hueFindTracker.reset();
+  setFeedback(findResult, "Type a color or shade name to begin.");
 });
 
-// HueDo interprets open-ended instructions and turns supported details into camera cues.
-instructionImageInput.addEventListener("change", () => {
-  const file = instructionImageInput.files?.[0];
-  instructionImage = file || null;
-  instructionFileName.textContent = file ? file.name : "No photo";
-  instructionImagePreview.replaceChildren();
+// HueDo uses a reference frame for semantic detection, then follows its target live on webcam frames.
+const SCENE_MAX_WIDTH = 1280;
 
-  if (instructionImageUrl) URL.revokeObjectURL(instructionImageUrl);
-  instructionImageUrl = null;
-
-  if (file) {
-    instructionImageUrl = URL.createObjectURL(file);
-    const image = document.createElement("img");
-    image.src = instructionImageUrl;
-    image.alt = "Selected instruction";
-    instructionImagePreview.append(image);
-    instructionImagePreview.hidden = false;
-  } else {
-    instructionImagePreview.hidden = true;
-  }
+function showSoundState() {
+  soundToggle.setAttribute("aria-pressed", String(soundOn));
+  soundToggle.setAttribute("aria-label", soundOn ? "Turn sound off" : "Turn sound on");
+  soundToggle.querySelector("span:first-child").textContent = soundOn ? "🔊" : "🔇";
+  soundToggle.querySelector("span:last-child").textContent = soundOn ? "Sound on" : "Sound off";
+}
+soundToggle.addEventListener("click", () => {
+  soundOn = !soundOn;
+  try { localStorage.setItem("hue-sound", soundOn ? "on" : "off"); } catch { /* storage disabled */ }
+  if (!soundOn && "speechSynthesis" in window) window.speechSynthesis.cancel();
+  showSoundState();
+  if (soundOn) speak("Sound on.");
 });
+showSoundState();
 
-async function fileToInlineImage(file) {
-  if (file.size > 8 * 1024 * 1024) {
-    throw new Error("Choose an image smaller than 8 MB.");
-  }
-  const dataUrl = await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error("Could not read the selected image."));
-    reader.readAsDataURL(file);
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Could not read that picture."));
+    image.src = src;
   });
-  const [header, data] = dataUrl.split(",");
-  const mimeType = header.match(/data:(.*?);base64/)?.[1] || file.type || "image/jpeg";
-  return { mimeType, data };
 }
 
-function renderTaskDraftPreview(draft) {
-  taskStepsPreview.replaceChildren();
-  (draft.steps || []).forEach((step) => {
-    const item = document.createElement("li");
-    item.textContent = step;
-    taskStepsPreview.append(item);
-  });
-  if (!draft.steps?.length) {
-    const item = document.createElement("li");
-    item.textContent = "Follow the instruction as written.";
-    taskStepsPreview.append(item);
+// Draws any image source to a JPEG no wider than SCENE_MAX_WIDTH and returns a scene picture.
+async function makeScene(source, sourceWidth, sourceHeight, origin, name = "") {
+  const scale = Math.min(1, SCENE_MAX_WIDTH / Math.max(sourceWidth, sourceHeight, 1));
+  const still = document.createElement("canvas");
+  still.width = Math.max(1, Math.round(sourceWidth * scale));
+  still.height = Math.max(1, Math.round(sourceHeight * scale));
+  const stillContext = still.getContext("2d");
+  stillContext.fillStyle = "#fff";
+  stillContext.fillRect(0, 0, still.width, still.height);
+  stillContext.drawImage(source, 0, 0, still.width, still.height);
+  const dataUrl = still.toDataURL("image/jpeg", 0.85);
+  const image = await loadImage(dataUrl);
+  return {
+    mimeType: "image/jpeg",
+    data: dataUrl.split(",")[1],
+    dataUrl,
+    image,
+    width: still.width,
+    height: still.height,
+    origin,
+    name
+  };
+}
+
+function captureCameraScene() {
+  if (!streaming || !video.videoWidth || !video.videoHeight) return Promise.resolve(null);
+  return makeScene(video, video.videoWidth, video.videoHeight, "camera");
+}
+
+async function fileToScene(file) {
+  if (file.type && !file.type.startsWith("image/")) throw new Error("Choose an image file.");
+  const url = URL.createObjectURL(file);
+  try {
+    const image = await loadImage(url);
+    return await makeScene(image, image.naturalWidth, image.naturalHeight, "upload", file.name);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function showingScene() {
+  return currentMode === "do" && Boolean(scenePhoto) && !streaming;
+}
+
+function setScenePhoto(scene, { keepLocations = false } = {}) {
+  scenePhoto = scene;
+  if (!keepLocations) { sceneLocations = []; resetHueDoTracking(); }
+  instructionImagePreview.replaceChildren();
+  if (scene) {
+    const image = document.createElement("img");
+    image.src = scene.dataUrl;
+    image.alt = "Picture HueDo will use";
+    instructionImagePreview.append(image);
+  }
+  instructionImagePreview.hidden = !scene;
+  clearSceneBtn.hidden = !scene;
+  instructionFileName.textContent = !scene
+    ? "No picture yet"
+    : scene.origin === "camera" ? "Picture taken with the camera" : scene.name || "Uploaded picture";
+  interpretStatus.classList.remove("is-error");
+  renderScene();
+}
+
+function drawCircleAround(rect, accent) {
+  const centerX = rect.x + rect.width / 2;
+  const centerY = rect.y + rect.height / 2;
+  const radiusX = rect.width / 2 * 1.2 + 6;
+  const radiusY = rect.height / 2 * 1.15 + 6;
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(centerX, centerY, radiusX, radiusY, 0, 0, Math.PI * 2);
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = "rgba(8,16,13,.8)";
+  ctx.stroke();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = accent;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawAreaBox(rect, accent, fill = "") {
+  ctx.save();
+  if (fill) {
+    ctx.fillStyle = fill;
+    ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+  }
+  ctx.setLineDash([4, 5]);
+  ctx.lineWidth = 3.2;
+  ctx.strokeStyle = "rgba(8,16,13,.78)";
+  ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+  ctx.lineWidth = 1.8;
+  ctx.strokeStyle = accent;
+  ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+  ctx.restore();
+}
+
+function resetHueDoTracking() {
+  hueDoTrackers.target.reset();
+  hueDoTrackers.destination.reset();
+  hueDoColorTracker.reset();
+  hueDoLastResults = { target: null, destination: null };
+  hueDoLastFrame = 0;
+  hueDoReferenceLabels = { target: "Target", destination: "Destination" };
+  clearVectorOutline();
+}
+
+function seedHueDoTrackers() {
+  resetHueDoTracking();
+  if (!scenePhoto?.image) return false;
+  const width = 320;
+  const height = Math.max(1, Math.round(width * scenePhoto.height / scenePhoto.width));
+  samplingCanvas.width = width;
+  samplingCanvas.height = height;
+  samplingContext.drawImage(scenePhoto.image, 0, 0, width, height);
+  const referenceFrame = samplingContext.getImageData(0, 0, width, height);
+  const target = sceneLocations.find((location) => location.role === "target");
+  const destination = sceneLocations.find((location) => location.role === "destination");
+  if (target) {
+    hueDoTrackers.target.seed(referenceFrame, target.box);
+    hueDoReferenceLabels.target = target.label || targetLabel();
+  }
+  if (destination) {
+    hueDoTrackers.destination.seed(referenceFrame, destination.box);
+    hueDoReferenceLabels.destination = destination.label || destinationLabel();
+  }
+  return Boolean(target || destination);
+}
+
+function drawHueDoLiveOverlay() {
+  if (!streaming || currentMode !== "do" || !video.videoWidth || video.readyState < 2) return;
+  const width = 320;
+  const height = Math.max(1, Math.round(width * video.videoHeight / video.videoWidth));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  samplingCanvas.width = width;
+  samplingCanvas.height = height;
+  samplingContext.drawImage(video, 0, 0, width, height);
+  const frame = samplingContext.getImageData(0, 0, width, height);
+
+  ctx.clearRect(0, 0, width, height);
+  clearVectorOutline();
+  if (!activeTask) {
+    setCameraChips([]);
+    return;
   }
 
-  taskCuePreview.replaceChildren();
-  (draft.visualCues || []).forEach((cue) => {
-    const pill = document.createElement("span");
-    pill.className = "task-cue-pill";
-    pill.textContent = cue.label || cue.object || cue.role || "Visual cue";
-    pill.style.setProperty("--cue-color", chipColors[String(cue.color || "").toLowerCase()] || "var(--brand)");
-    taskCuePreview.append(pill);
+  const targetResult = hueDoTrackers.target.update(frame);
+  const destinationResult = hueDoTrackers.destination.update(frame);
+  let target = targetResult?.visible ? { ...targetResult, source: "object" } : null;
+  const destination = destinationResult?.visible ? { ...destinationResult, source: "object" } : null;
+
+  // If semantic detection did not return a target box, a named task color can
+  // still provide a useful live outline. The label makes clear this is a color
+  // match, not proof that the region is the requested object.
+  if (!target && activeTask.color && !hueDoTrackers.target.template) {
+    const family = normalizeColorName(activeTask.color);
+    const regions = findSmoothColorContours(frame, {
+      color: family, minAreaFraction: .009, relativeMinArea: .22, maxRegions: 1
+    });
+    const stable = hueDoColorTracker.update(regions, width, height)[0];
+    if (stable) target = {
+      bounds: stable.bounds,
+      center: stable.center,
+      confidence: 0.66,
+      visible: true,
+      source: "color"
+    };
+  }
+
+  const chips = [];
+  let targetCenter = null;
+  let destinationCenter = null;
+  if (target) {
+    targetCenter = target.center;
+    const rect = target.bounds;
+    drawAreaBox(rect, target.source === "color" ? "#9be3c2" : "#f5df91", "rgba(245,223,145,.08)");
+    drawCircleAround(rect, target.source === "color" ? "#9be3c2" : "#f5df91");
+    chips.push({
+      key: "huedo-live-target",
+      label: `${target.source === "color" ? "COLOR MATCH · " : "TARGET · "}${hueDoReferenceLabels.target || targetLabel()}`,
+      hex: target.source === "color" ? "#9be3c2" : "#f5df91",
+      point: { x: targetCenter.x, y: Math.max(0, rect.y - 5) }
+    });
+  } else if (hueDoTrackers.target.template) {
+    const last = targetResult?.bounds || hueDoTrackers.target.bounds;
+    if (last) drawAreaBox(last, "#efb18e", "rgba(239,177,142,.04)");
+  }
+
+  if (destination) {
+    destinationCenter = destination.center;
+    drawAreaBox(destination.bounds, activeTask.completed ? "#8fe0b0" : "#8fc7ee", "rgba(143,199,238,.10)");
+    chips.push({
+      key: "huedo-live-destination",
+      label: `DESTINATION · ${hueDoReferenceLabels.destination || destinationLabel()}`,
+      hex: activeTask.completed ? "#8fe0b0" : "#8fc7ee",
+      point: { x: destinationCenter.x, y: Math.max(0, destination.bounds.y - 5) }
+    });
+  } else if (hueDoTrackers.destination.template) {
+    const last = destinationResult?.bounds || hueDoTrackers.destination.bounds;
+    if (last) drawAreaBox(last, "#8fc7ee", "rgba(143,199,238,.04)");
+  }
+
+  if (targetCenter && destinationCenter && currentStep()?.kind === "place" && !activeTask.completed) {
+    drawArrow(targetCenter, destinationCenter, "#f4d989");
+  }
+  setCameraChips(showColorChips ? chips : []);
+
+  const targetWasDetected = Boolean(hueDoTrackers.target.template);
+  const message = target
+    ? destination
+      ? "Live tracking: follow the arrow from the target to the destination."
+      : target.source === "color"
+        ? `Live color match for ${activeTask.color}. Check that the outlined area is the right object.`
+        : `Live tracking ${hueDoReferenceLabels.target || targetLabel()}. Keep it in view as you move.`
+    : targetWasDetected
+      ? `Target not in view. Move the camera slowly to reacquire ${hueDoReferenceLabels.target || targetLabel()}.`
+      : activeTask.color
+        ? `Looking for a ${activeTask.color} area. Move the camera closer and check that the outline matches the object.`
+        : "Live camera is on. Retake the starting picture with the target clearly visible to add a live outline.";
+  setFeedback(taskResult, message);
+}
+
+// Shows the picture in the camera area with circles around what Gemini found.
+function renderScene() {
+  if (streaming && currentMode === "do") {
+    cameraFrame.classList.remove("is-scene");
+    cameraPlaceholder.classList.add("is-hidden");
+    sampleIndicator.classList.remove("is-visible");
+    drawHueDoLiveOverlay();
+    return;
+  }
+  if (!showingScene()) {
+    cameraFrame.classList.remove("is-scene");
+    if (!streaming) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      cameraPlaceholder.classList.remove("is-hidden");
+      if (currentMode === "do") setCameraChips([]);
+    }
+    return;
+  }
+
+  cameraFrame.classList.add("is-scene");
+  cameraPlaceholder.classList.add("is-hidden");
+  sampleIndicator.classList.remove("is-visible");
+  canvas.width = scenePhoto.width;
+  canvas.height = scenePhoto.height;
+  ctx.drawImage(scenePhoto.image, 0, 0, canvas.width, canvas.height);
+
+  // Draw overlays in a 320-wide coordinate space so line widths match the live view.
+  const k = canvas.width / 320;
+  const width = 320;
+  const height = canvas.height / k;
+  const chips = [];
+  let targetCenter = null;
+  let destinationCenter = null;
+
+  ctx.save();
+  ctx.setTransform(k, 0, 0, k, 0, 0);
+  sceneLocations.forEach((location, index) => {
+    const rect = {
+      x: location.box.x * width,
+      y: location.box.y * height,
+      width: location.box.width * width,
+      height: location.box.height * height
+    };
+    const center = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+    const done = Boolean(activeTask?.completed);
+    if (location.role === "destination") {
+      drawAreaBox(rect, done ? "#8fe0b0" : "#f4d78c", done ? "rgba(143,224,176,.18)" : "");
+      destinationCenter ??= center;
+    } else {
+      drawCircleAround(rect, location.role === "target" ? "#f5e6a1" : "#b9e9cf");
+      if (location.role === "target") targetCenter ??= center;
+    }
+    chips.push({
+      key: `scene-${index}`,
+      label: location.label || (location.role === "destination" ? "Destination" : "Here"),
+      hex: location.role === "destination" ? "#f4d78c" : "#f5e6a1",
+      point: { x: center.x * k, y: Math.max(0, rect.y - 6) * k }
+    });
   });
+  if (targetCenter && destinationCenter && currentStep()?.kind === "place" && !activeTask?.completed) {
+    drawArrow(targetCenter, destinationCenter);
+  }
+  ctx.restore();
+
+  setCameraChips(showColorChips ? chips : []);
+}
+
+snapshotBtn.addEventListener("click", async () => {
+  if (!streaming) return;
+  const scene = await captureCameraScene();
+  if (!scene) return;
+  setScenePhoto(scene);
+  setActiveMode("do");
+  setFeedback(interpretStatus, "Picture taken. Now type what you're looking for and press Build visual guide.");
+  speak("Picture taken.");
+});
+
+instructionImageInput.addEventListener("change", async () => {
+  const file = instructionImageInput.files?.[0];
+  instructionImageInput.value = "";
+  if (!file) return;
+  try {
+    setScenePhoto(await fileToScene(file));
+    setActiveMode("do");
+    setFeedback(interpretStatus, "Picture added. Now type what you're looking for and press Build visual guide.");
+  } catch (error) {
+    setFeedback(interpretStatus, error.message);
+  }
+});
+
+clearSceneBtn.addEventListener("click", () => {
+  setScenePhoto(null);
+  setFeedback(interpretStatus, "Picture cleared.");
+});
+
+// --- Steps 2 and 3: show what was understood, let the user fix it and confirm ---
+function readDraftFields() {
+  return {
+    ...(pendingTaskDraft || {}),
+    color: taskColorInput.value.trim().toLowerCase(),
+    object: taskObjectInput.value.trim(),
+    action: taskActionInput.value.trim().toLowerCase(),
+    destination: taskDestinationInput.value.trim()
+  };
+}
+
+function refreshDraftPreview() {
+  const draft = readDraftFields();
+  const sentence = describeTask(draft) || draft.summary || "";
+  const steps = buildGuideSteps({ ...draft, summary: sentence });
+  taskReadback.textContent = sentence;
+  taskAnswer.textContent = draft.answer || "";
+  taskAnswer.hidden = !draft.answer;
+  taskStepsPreview.replaceChildren();
+  steps.forEach((step) => {
+    const item = document.createElement("li");
+    item.textContent = step.text;
+    taskStepsPreview.append(item);
+  });
+  return { draft, sentence, steps };
+}
+
+function showDraft(draft, sourceNote) {
+  pendingTaskDraft = draft;
+  taskColorInput.value = draft.color || "";
+  taskObjectInput.value = draft.object || "";
+  taskActionInput.value = draft.action || "";
+  taskDestinationInput.value = draft.destination || "";
+  taskSourceNote.textContent = sourceNote;
+  parsedTask.hidden = false;
+  sceneLocations = draft.locations || [];
+  renderScene();
+  const { sentence } = refreshDraftPreview();
+  speak([`I understood: ${sentence}`, draft.answer, "Is that right?"].filter(Boolean).join(" "));
+}
+
+[taskColorInput, taskObjectInput, taskActionInput, taskDestinationInput].forEach((field) => {
+  field.addEventListener("input", refreshDraftPreview);
+});
+
+readTaskBtn.addEventListener("click", () => {
+  const { draft, sentence, steps } = refreshDraftPreview();
+  speak([sentence, draft.answer, ...steps.map((step, index) => `Step ${index + 1}. ${step.text}`)].filter(Boolean).join(" "));
+});
+
+function showInterpretError(message) {
+  setFeedback(interpretStatus, message);
+  interpretStatus.classList.add("is-error");
+  speak(message);
 }
 
 interpretBtn.addEventListener("click", async () => {
   const text = instructionInput.value.trim();
-  if (!text && !instructionImage) {
-    setFeedback(interpretStatus, "Add an instruction or photo first.");
+  interpretStatus.classList.remove("is-error");
+  if (!text) {
+    showInterpretError("Type what you need, for example: Where is the pink pen?");
+    return;
+  }
+  if (!streaming && !scenePhoto) {
+    showInterpretError("Start the webcam or upload a picture to build a visual guide.");
     return;
   }
 
   interpretBtn.disabled = true;
-  interpretBtn.textContent = "Building guide…";
+  interpretBtn.textContent = streaming ? "Reading live camera…" : "Looking at the picture…";
   setFeedback(interpretStatus, "");
+  setActiveMode("do");
 
   try {
-    const image = instructionImage ? await fileToInlineImage(instructionImage) : null;
-    const result = await interpret(text, image);
-    pendingTaskDraft = {
+    // Use the current webcam frame as the semantic reference when the camera is live.
+    // The returned target/destination boxes seed the local, continuous tracker.
+    const referenceScene = streaming ? await captureCameraScene() : scenePhoto;
+    if (!referenceScene) throw new Error("The camera frame is not ready yet. Wait a moment and try again.");
+    if (streaming) setScenePhoto(referenceScene);
+    const result = await interpret(text, { mimeType: referenceScene.mimeType, data: referenceScene.data });
+    const basic = parseInstruction(text);
+    const target = describeTarget({ color: result.targetColor || basic.color, object: result.targetObject || basic.object });
+    const foundTarget = (result.locations || []).some((location) => location.role === "target");
+    const missingNote = result.locateBusy
+      ? `Gemini was too busy to circle the ${target} just now. Press Build visual guide again in a few seconds.`
+      : `I couldn't find the ${target} in this picture. Try another picture.`;
+    showDraft({
       summary: result.summary || text,
       steps: Array.isArray(result.steps) ? result.steps : [],
       visualCues: Array.isArray(result.visualCues) ? result.visualCues : [],
-      color: result.targetColor || "",
-      object: result.targetObject || "",
-      action: result.action || "",
-      destination: result.destination || ""
-    };
-    taskSummaryInput.value = pendingTaskDraft.summary;
-    renderTaskDraftPreview(pendingTaskDraft);
-    parsedTask.hidden = false;
-    setFeedback(interpretStatus, "Guide ready to review.");
+      color: result.targetColor || basic.color || "",
+      object: result.targetObject || basic.object || "",
+      action: result.action || basic.action || "",
+      destination: result.destination || basic.destination || "",
+      relation: result.relation || basic.relation || "",
+      answer: [result.answer, target && !foundTarget ? missingNote : ""].filter(Boolean).join(" "),
+      locations: result.locations || [],
+      groups: Array.isArray(result.groups) ? result.groups : []
+    }, "Read by Gemini. Fix anything that's wrong, then start.");
+    setFeedback(interpretStatus, "Check the details below.");
   } catch (error) {
-    const fallbackSummary = text || "Follow the instruction in the attached photo.";
-    pendingTaskDraft = {
-      summary: fallbackSummary,
-      steps: [fallbackSummary],
+    const basic = parseInstruction(text);
+    const target = describeTarget(basic);
+    showDraft({
+      ...basic,
+      steps: [],
       visualCues: [],
-      color: "",
-      object: "",
-      action: "",
-      destination: ""
-    };
-    taskSummaryInput.value = fallbackSummary;
-    renderTaskDraftPreview(pendingTaskDraft);
-    parsedTask.hidden = false;
-    setFeedback(interpretStatus, `${error.message} You can still save this as a manual guide.`);
+      locations: [],
+      answer: target ? `Nothing is circled because Gemini didn't answer: ${error.message}` : ""
+    }, `Gemini didn't answer (${error.message}), so I used a basic reading and couldn't look at the picture.`);
+    setFeedback(interpretStatus, `Gemini: ${error.message}`);
   } finally {
     interpretBtn.disabled = false;
     interpretBtn.textContent = "Build visual guide";
@@ -1243,208 +2014,322 @@ interpretBtn.addEventListener("click", async () => {
 });
 
 saveTaskBtn.addEventListener("click", async () => {
-  const draft = {
-    ...(pendingTaskDraft || {}),
-    summary: taskSummaryInput.value.trim()
-  };
-
-  if (!draft.summary) {
+  const { draft, sentence, steps } = refreshDraftPreview();
+  if (!sentence) {
     setFeedback(interpretStatus, "Add a short description of the task.");
     return;
   }
 
+  const { locations = [], answer = "", ...rest } = draft;
+  const task = { ...rest, summary: sentence, steps: steps.map((step) => step.text) };
+
   saveTaskBtn.disabled = true;
-  saveTaskBtn.textContent = "Saving…";
+  saveTaskBtn.textContent = "Starting…";
+  let saved = task;
+  let saveNote = "";
   try {
-    const saved = await createTask(draft);
-    setActiveTask(saved);
-    setActiveMode("do");
-    await refreshTaskLibrary();
-    setFeedback(interpretStatus, "Visual guide is ready in the camera view.");
-    speak(draft.summary);
+    saved = await createTask({ ...task, locations, answer, sceneImage: scenePhoto
+      ? { mimeType: scenePhoto.mimeType, data: scenePhoto.data } : null });
+    refreshTaskLibrary();
   } catch (error) {
-    setFeedback(interpretStatus, error.message || "Could not save the guide.");
+    console.warn("Could not save guide:", error);
+    saveNote = " (Not saved to HueMemory, but the guide still works.)";
   } finally {
     saveTaskBtn.disabled = false;
-    saveTaskBtn.textContent = "Use this guide";
+    saveTaskBtn.textContent = "Yes, start guide";
   }
+
+  parsedTask.hidden = true;
+  setFeedback(interpretStatus, `Guide started.${saveNote}`);
+  setActiveTask({ ...saved, groups: task.groups || [], answer, locations }, { prefix: `Starting: ${sentence}` });
+  setActiveMode("do");
 });
 
-function setActiveTask(task) {
-  const summary = task.summary || task.task || [task.action, task.color, task.object, task.destination].filter(Boolean).join(" ") || "Follow the saved task.";
-  const visualCues = Array.isArray(task.visualCues) ? [...task.visualCues] : [];
-  if (!visualCues.length && task.color) {
-    visualCues.push({
-      label: [task.color, task.object].filter(Boolean).join(" ") || task.color,
-      role: "target",
-      color: task.color,
-      object: task.object || ""
-    });
-  }
-  if (task.destination && !visualCues.some((cue) => String(cue.role || "").toLowerCase() === "destination")) {
-    visualCues.push({
-      label: task.destination,
-      role: "destination",
-      location: task.destination,
-      direction: ""
-    });
-  }
+// --- Steps 4 to 7: the guided task ---
+function currentStep() {
+  return activeTask?.guideSteps?.[guideStepIndex] || null;
+}
 
-  const normalizedColor = normalizeColorCategory(task.targetColor || task.color || visualCues.find((cue) => cue.color)?.color || "");
-  if (normalizedColor && !visualCues.some((cue) => cue.color)) {
-    visualCues.push({ label: task.color || normalizedColor, role: "target", color: task.color || normalizedColor });
-  }
-  const zoneKey = normalizeZone(task.destination || visualCues.find((cue) => String(cue.role || "").toLowerCase() === "destination")?.location || "");
-  activeTask = {
-    ...task,
-    summary,
-    visualCues,
-    normalizedColor,
-    zoneKey,
-    canAutoVerify: Boolean(normalizedColor && zoneKey)
-  };
+function targetLabel() {
+  return describeTarget({ color: activeTask?.color, object: activeTask?.object }) || "target";
+}
 
-  taskSuccessStreak = 0;
+function destinationLabel() {
+  return activeTask?.destination || "the destination";
+}
+
+function setActiveTask(task, { prefix = "" } = {}) {
+  const summary = task.summary || describeTask(task) || "Follow the saved task.";
+  const guideSteps = buildGuideSteps({ ...task, summary });
+
+  activeTask = { ...task, summary, guideSteps, answer: task.answer || "" };
+  sceneLocations = Array.isArray(task.locations) ? task.locations : [];
+  seedHueDoTrackers();
+  if (task.sceneImage?.mimeType === "image/jpeg" && typeof task.sceneImage.data === "string" &&
+      scenePhoto?.data !== task.sceneImage.data) {
+    // A task loaded from the library may refer to a different original photo.
+    scenePhoto = null;
+    const originalImage = task.sceneImage;
+    loadImage(`data:${originalImage.mimeType};base64,${originalImage.data}`).then((image) => {
+      if (activeTask?._id !== task._id) return;
+      scenePhoto = { image, data: originalImage.data, dataUrl: image.src,
+        mimeType: originalImage.mimeType, width: image.naturalWidth, height: image.naturalHeight, origin: "saved", name: "Saved guide photo" };
+      instructionImagePreview.replaceChildren();
+      const thumb = document.createElement("img"); thumb.src = image.src; thumb.alt = "Photo used for this saved guide";
+      instructionImagePreview.append(thumb); instructionImagePreview.hidden = false;
+      clearSceneBtn.hidden = false;
+      instructionFileName.textContent = "Saved guide photo";
+      seedHueDoTrackers();
+      renderScene();
+    }).catch(() => setFeedback(taskResult, "Saved photo unavailable. Add another picture."));
+  } else if (!task.sceneImage && task._id) {
+    // Old saved guides have no stored picture; don't overlay their old boxes
+    // onto whatever another task most recently displayed.
+    scenePhoto = null;
+    sceneLocations = [];
+    resetHueDoTracking();
+  }
   taskCompletionPending = false;
-  activeTaskEmpty.hidden = true;
-  activeTaskContent.hidden = false;
-  taskStateMark.textContent = task.completed ? "✓" : "○";
-  taskStateMark.style.color = task.completed ? "var(--success)" : "";
-  activeTaskSummary.textContent = summary;
-  activeTaskSteps.replaceChildren();
-  (Array.isArray(task.steps) ? task.steps : []).forEach((step) => {
-    const item = document.createElement("li");
-    item.textContent = step;
-    activeTaskSteps.append(item);
-  });
-  targetColor = normalizedColor;
+
+  // HueFind can still look for the same color on the live camera.
+  targetColor = normalizeColorName(task.color);
   targetRgb = null;
   targetShade = "";
   colorSelect.value = targetColor;
-  colorSelect.disabled = !streaming;
-  taskBtn.disabled = Boolean(task.completed) || Boolean(activeTask.canAutoVerify && !streaming);
-  taskBtn.textContent = task.completed ? "Completed" : activeTask.canAutoVerify ? "Check placement" : "Mark complete";
-  setFeedback(taskResult, task.completed
-    ? "This guide is complete."
-    : activeTask.canAutoVerify
-      ? "Camera is checking the target color in the named area."
-      : streaming
-        ? "Follow the visual cues, then confirm when finished."
-        : "Start the camera to show visual cues.");
-  if (task.completed) taskStateMark.textContent = "✓";
+
+  activeTaskEmpty.hidden = true;
+  activeTaskContent.hidden = false;
+  activeTaskSummary.textContent = summary;
+  guideDone.hidden = true;
+  guideStepCard.hidden = false;
+  taskStateMark.textContent = "○";
+  taskStateMark.style.color = "";
+
+  if (task.completed) {
+    showCompletion(false, "", false);
+    return;
+  }
+  goToStep(0, { prefix });
+}
+
+function renderGuideSteps() {
+  activeTaskSteps.replaceChildren();
+  activeTask.guideSteps.forEach((step, index) => {
+    const item = document.createElement("li");
+    item.textContent = step.text;
+    const current = !activeTask.completed && index === guideStepIndex;
+    item.classList.toggle("is-done", activeTask.completed || index < guideStepIndex);
+    item.classList.toggle("is-current", current);
+    if (current) item.setAttribute("aria-current", "step");
+    activeTaskSteps.append(item);
+  });
+}
+
+function stepStatusText(step) {
+  if (step.kind === "find") {
+    if (streaming) return `Live camera guide: look for the circle and outline around ${targetLabel()}. Markers update as you move the camera.`;
+    if (!scenePhoto) return "Start the camera or upload a picture to build a visual guide.";
+    const found = sceneLocations.some((location) => location.role === "target");
+    if (!found && activeTask.color) return `No object box was returned. Start the camera to look for a live ${activeTask.color} match.`;
+    const isAre = isPlural(activeTask.object) ? "are" : "is";
+    return activeTask.answer || (found ? `The ${targetLabel()} ${isAre} circled.` : `I couldn't find the ${targetLabel()} in this picture.`);
+  }
+  if (step.kind === "place") {
+    return streaming
+      ? `Move the outlined target toward the destination marker. The arrow updates live; press "Check with a new picture" when it's done.`
+      : `Start the camera to see live target and destination markers, then press "Check with a new picture" when it's done.`;
+  }
+  return "Press Next when you're ready.";
+}
+
+function goToStep(index, { prefix = "", announce = true } = {}) {
+  if (!activeTask) return;
+  const steps = activeTask.guideSteps;
+  guideStepIndex = clamp(index, 0, steps.length - 1);
+  const step = steps[guideStepIndex];
+
+  const targetMissing = step.kind === "find" && !sceneLocations.some((location) => location.role === "target") && !activeTask.color;
+  const stepText = targetMissing
+    ? `The ${targetLabel()} ${isPlural(activeTask.object) ? "aren't" : "isn't"} circled yet. Press Build visual guide again, or take a new picture.`
+    : step.text;
+  guideStepCount.textContent = `Step ${guideStepIndex + 1} of ${steps.length}`;
+  guideStepText.textContent = stepText;
+  checkPictureBtn.hidden = step.kind !== "place";
+  prevStepBtn.disabled = guideStepIndex === 0;
+  taskBtn.disabled = false;
+  taskBtn.textContent = guideStepIndex === steps.length - 1 ? "Done" : "Next";
+  renderGuideSteps();
+  const status = stepStatusText(step);
+  setFeedback(taskResult, status);
+  renderScene();
+
+  if (announce) {
+    const extra = step.kind === "find" ? status : "";
+    speak([prefix, `Step ${guideStepIndex + 1} of ${steps.length}.`, stepText, targetMissing ? "" : extra].filter(Boolean).join(" "));
+  }
+}
+
+function refreshGuideStatus() {
+  if (!activeTask || activeTask.completed) return;
+  const step = currentStep();
+  if (step) setFeedback(taskResult, stepStatusText(step));
+}
+
+checkPictureBtn.addEventListener("click", async () => {
+  if (!activeTask || activeTask.completed) return;
+  if (!streaming) {
+    const message = "Start the camera so I can take the check picture.";
+    setFeedback(taskResult, message);
+    speak(message);
+    return;
+  }
+
+  checkPictureBtn.disabled = true;
+  checkPictureBtn.textContent = "Checking…";
+  try {
+    const scene = await captureCameraScene();
+    setScenePhoto(scene);
+    speak("Checking.");
+    const result = await checkTask({ mimeType: scene.mimeType, data: scene.data }, {
+      summary: activeTask.summary,
+      target: targetLabel(),
+      destination: activeTask.destination || ""
+    });
+    sceneLocations = result.locations || [];
+    seedHueDoTrackers();
+    if (result.done) {
+      completeActiveTask(true, result.message);
+    } else {
+      renderScene();
+      const message = result.message || (isSortTask(activeTask) || !activeTask.destination
+        ? "Not done yet. Fix it, then check again."
+        : `Not done yet. Put the ${targetLabel()} ${normalizeRelation(activeTask.relation)} ${destinationLabel()}, then check again.`);
+      setFeedback(taskResult, message);
+      speak(message);
+    }
+  } catch (error) {
+    const message = `I couldn't check automatically (${error.message}). Press Done when it's finished.`;
+    setFeedback(taskResult, message);
+    speak(message);
+  } finally {
+    checkPictureBtn.disabled = false;
+    checkPictureBtn.textContent = "📷 Check with a new picture";
+  }
+});
+
+prevStepBtn.addEventListener("click", () => {
+  if (activeTask && !activeTask.completed) goToStep(guideStepIndex - 1);
+});
+
+repeatStepBtn.addEventListener("click", () => {
+  if (!activeTask) return;
+  if (activeTask.completed) {
+    speak(guideDoneText.textContent);
+    return;
+  }
+  const step = currentStep();
+  speak(`Step ${guideStepIndex + 1} of ${activeTask.guideSteps.length}. ${step.text} ${taskResult.textContent}`);
+});
+
+taskBtn.addEventListener("click", () => {
+  if (!activeTask || activeTask.completed) return;
+  if (guideStepIndex >= activeTask.guideSteps.length - 1) {
+    completeActiveTask(false);
+    return;
+  }
+  goToStep(guideStepIndex + 1);
+});
+
+function playChime() {
+  if (!soundOn) return;
+  try {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return;
+    const audio = new AudioContextClass();
+    [523.25, 659.25, 783.99].forEach((frequency, index) => {
+      const oscillator = audio.createOscillator();
+      const gain = audio.createGain();
+      const start = audio.currentTime + index * 0.14;
+      oscillator.type = "sine";
+      oscillator.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.25, start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.35);
+      oscillator.connect(gain).connect(audio.destination);
+      oscillator.start(start);
+      oscillator.stop(start + 0.4);
+    });
+    window.setTimeout(() => audio.close(), 1200);
+  } catch (error) {
+    console.warn("Chime unavailable:", error);
+  }
+}
+
+function showCompletion(verified, detail = "", announce = true) {
+  activeTask.completed = true;
+  checkPictureBtn.hidden = true;
+  guideStepCard.hidden = true;
+  guideDone.hidden = false;
+  const message = verified
+    ? `Done! ${detail || `The ${targetLabel()} is ${normalizeRelation(activeTask.relation)} ${destinationLabel()}.`}`
+    : "Done! Task marked complete.";
+  guideDoneText.textContent = message;
+  taskStateMark.textContent = "✓";
+  taskStateMark.style.color = "var(--success)";
+  taskBtn.disabled = true;
+  taskBtn.textContent = "Completed";
+  prevStepBtn.disabled = true;
+  setFeedback(taskResult, verified ? "Checked from the picture." : "Completed.");
+  renderGuideSteps();
+  renderScene();
+  if (announce) {
+    playChime();
+    speak(message);
+  }
+}
+
+async function completeActiveTask(verified = false, detail = "") {
+  if (!activeTask || taskCompletionPending) return;
+  taskCompletionPending = true;
+  showCompletion(verified, detail);
+
+  if (activeTask._id) {
+    try {
+      const updated = await completeTask(activeTask._id, true);
+      activeTask = { ...activeTask, ...updated, guideSteps: activeTask.guideSteps };
+      await refreshTaskLibrary();
+    } catch (error) {
+      console.error("Could not persist task completion:", error);
+    }
+  }
 }
 
 function clearActiveTask() {
   activeTask = null;
-  taskSuccessStreak = 0;
+  sceneLocations = [];
+  resetHueDoTracking();
   taskCompletionPending = false;
   activeTaskEmpty.hidden = false;
   activeTaskContent.hidden = true;
   taskStateMark.textContent = "○";
+  taskStateMark.style.color = "";
   targetColor = "";
+  targetRgb = null;
+  targetShade = "";
+  targetStrictShade = false;
+  findNoMatchFrames = 0;
+  findSuggestionShown = false;
+  closeFindSuggestions();
   colorSelect.value = "";
   setCameraChips([]);
-  setFeedback(findResult, "Choose a target to begin.");
+  renderScene();
+  setFeedback(findResult, "Type a color or shade name to begin.");
 }
 
 clearTaskBtn.addEventListener("click", clearActiveTask);
 
 function capitalize(value = "") {
   return String(value).charAt(0).toUpperCase() + String(value).slice(1);
-}
-
-function sampleColorInDestination() {
-  if (!activeTask?.canAutoVerify || !video.videoWidth || !video.videoHeight) {
-    return { found: false, hits: 0, ratio: 0 };
-  }
-
-  const width = 320;
-  const height = Math.max(1, Math.round(width * video.videoHeight / video.videoWidth));
-  if (samplingCanvas.width !== width || samplingCanvas.height !== height) {
-    samplingCanvas.width = width;
-    samplingCanvas.height = height;
-  }
-  samplingContext.drawImage(video, 0, 0, width, height);
-
-  const zone = getZoneBounds(activeTask.zoneKey);
-  if (!zone) return { found: false, hits: 0, ratio: 0 };
-  const left = clamp(zone.x, 0, width - 1);
-  const top = clamp(zone.y, 0, height - 1);
-  const zoneWidth = clamp(zone.width, 1, width - left);
-  const zoneHeight = clamp(zone.height, 1, height - top);
-  const pixels = samplingContext.getImageData(left, top, zoneWidth, zoneHeight).data;
-
-  let hits = 0;
-  let total = 0;
-  const target = activeTask.normalizedColor;
-  if (!target) return { found: false, hits: 0, ratio: 0 };
-
-  const step = 6;
-  for (let y = 0; y < zoneHeight; y += step) {
-    for (let x = 0; x < zoneWidth; x += step) {
-      const index = (y * zoneWidth + x) * 4;
-      const detected = classifyColor(pixels[index], pixels[index + 1], pixels[index + 2]).name.toLowerCase();
-      if (detected === target) hits += 1;
-      total += 1;
-    }
-  }
-
-  const ratio = total ? hits / total : 0;
-  return { found: hits >= 4 && ratio >= 0.025, hits, ratio };
-}
-
-function verifyTaskFrame() {
-  if (!activeTask?.canAutoVerify) return;
-  const result = sampleColorInDestination();
-  if (result.found) {
-    taskSuccessStreak += 1;
-    setFeedback(taskResult, `Target detected in ${activeTask.zoneKey}. Confirming…`);
-    if (taskSuccessStreak >= 4) completeActiveTask(true);
-  } else {
-    taskSuccessStreak = 0;
-    setFeedback(taskResult, `Looking for ${activeTask.color || activeTask.normalizedColor} in ${activeTask.zoneKey}.`);
-  }
-}
-
-taskBtn.addEventListener("click", () => {
-  if (!activeTask || activeTask.completed) return;
-  if (!activeTask.canAutoVerify) {
-    completeActiveTask(false);
-    return;
-  }
-  if (!streaming) return;
-
-  const result = sampleColorInDestination();
-  if (result.found) {
-    setFeedback(taskResult, `Target found in ${activeTask.zoneKey}. Holding for confirmation…`);
-    speak(`${activeTask.color || activeTask.normalizedColor} detected in ${activeTask.zoneKey}.`);
-  } else {
-    setFeedback(taskResult, `Target not confirmed in ${activeTask.zoneKey}.`);
-    speak(`The target was not confirmed in ${activeTask.zoneKey}.`);
-  }
-});
-
-async function completeActiveTask(cameraVerified = false) {
-  if (!activeTask || taskCompletionPending) return;
-  taskCompletionPending = true;
-  activeTask.completed = true;
-  taskStateMark.textContent = "✓";
-  taskStateMark.style.color = "var(--success)";
-  taskBtn.disabled = true;
-  taskBtn.textContent = "Completed";
-  setFeedback(taskResult, cameraVerified ? "Task verified by the camera." : "Task marked complete.");
-  speak(cameraVerified ? "Task completed and verified." : "Task marked complete.");
-
-  if (activeTask._id) {
-    try {
-      const updated = await completeTask(activeTask._id, true);
-      activeTask = { ...activeTask, ...updated };
-      await refreshTaskLibrary();
-    } catch (error) {
-      console.error("Could not persist task completion:", error);
-      setFeedback(taskResult, "Marked complete here, but could not sync to the saved guides.");
-    }
-  }
 }
 
 async function refreshTaskLibrary() {
@@ -1495,6 +2380,21 @@ function renderTaskLibrary(tasks) {
     });
     actions.append(useButton);
 
+    const removeButton = document.createElement("button");
+    removeButton.type = "button";
+    removeButton.textContent = "Remove";
+    removeButton.setAttribute("aria-label", `Remove saved guide: ${title.textContent}`);
+    removeButton.addEventListener("click", async () => {
+      removeButton.disabled = true;
+      try {
+        await deleteTask(task._id);
+        await refreshTaskLibrary();
+      } catch (error) {
+        removeButton.disabled = false;
+        meta.textContent = error.message || "Could not remove guide.";
+      }
+    });
+
     if (!task.completed) {
       const doneButton = document.createElement("button");
       doneButton.type = "button";
@@ -1512,6 +2412,7 @@ function renderTaskLibrary(tasks) {
       });
       actions.append(doneButton);
     }
+    actions.append(removeButton);
 
     row.append(copy, actions);
     taskLibrary.append(row);
@@ -1522,7 +2423,7 @@ refreshTasksBtn.addEventListener("click", refreshTaskLibrary);
 
 function speak(text) {
   announcer.textContent = text;
-  if ("speechSynthesis" in window && "SpeechSynthesisUtterance" in window) {
+  if (soundOn && "speechSynthesis" in window && "SpeechSynthesisUtterance" in window) {
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
     window.speechSynthesis.speak(utterance);
@@ -1533,7 +2434,8 @@ function speak(text) {
 mountPalette($("palette"), {
   onFindAgain: (color) => {
     const category = normalizeColorCategory(color.colorName || color.shade);
-    setFindTarget(category, true, color);
+    const shadeLabel = String(color.shade || color.colorName || "").replace(/\s+#?[0-9A-F]{6}$/i, "").trim();
+    setFindTarget(shadeLabel || category, true, { ...color, shade: shadeLabel || category });
     setActiveMode("find");
   }
 });
@@ -1548,5 +2450,29 @@ refreshTaskLibrary();
 // Revoke the temporary preview URL and stop the camera when the page closes.
 window.addEventListener("pagehide", () => {
   if (streaming) stopCamera();
-  if (instructionImageUrl) URL.revokeObjectURL(instructionImageUrl);
 });
+
+// The editorial page is one continuous document; these links open the existing
+// working mode panels without creating separate camera streams.
+document.querySelectorAll("[data-open-mode]").forEach((link) => {
+  link.addEventListener("click", () => setActiveMode(link.dataset.openMode));
+});
+
+const f1Reveals = [...document.querySelectorAll(".f1-reveal")];
+if ("IntersectionObserver" in window && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  const observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) if (entry.isIntersecting) {
+      entry.target.classList.add("is-shown");
+      observer.unobserve(entry.target);
+    }
+  }, { threshold: 0.06 });
+  f1Reveals.forEach((element) => observer.observe(element));
+} else f1Reveals.forEach((element) => element.classList.add("is-shown"));
+
+const scrollProgress = document.getElementById("scrollProgress");
+function updateScrollProgress() {
+  const range = document.documentElement.scrollHeight - window.innerHeight;
+  if (scrollProgress) scrollProgress.style.width = `${range > 0 ? window.scrollY / range * 100 : 0}%`;
+}
+window.addEventListener("scroll", updateScrollProgress, { passive: true });
+updateScrollProgress();
