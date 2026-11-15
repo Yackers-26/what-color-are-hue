@@ -10,9 +10,9 @@ const MODEL = String(process.env.GEMINI_MODEL || "").trim() || DEFAULT_GEMINI_MO
 
 // Free Gemini keys have a small per-minute limit for each model (error 429), and models can be busy (503).
 // Strategy: never wait long. If a model is limited, rest it for a minute and go straight to the next model.
-const BUSY = [429, 500, 503];
+const BUSY = [429, 500, 503, 504];
 const SKIP = [400, 404]; // model missing or not allowed for this key: move on to the next one
-const REQUEST_TIMEOUT_MS = 20000;
+const REQUEST_TIMEOUT_MS = 60000;
 const isBusy = (error) => BUSY.includes(Number(error?.status)) || !Number(error?.status);
 const restingUntil = new Map(); // model -> time it can be used again
 let fallbackModels = null;
