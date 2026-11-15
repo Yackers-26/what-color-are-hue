@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#f7f4ec" />
+  <title>Sign in · WhatColorAreHue</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/login.css" />
+  <script src="/login.js" type="module"></script>
+</head>
+<body>
+  <a class="skip" href="#auth-form">Skip to sign-in</a>
+  <header class="auth-header">
+    <a class="wordmark" href="/login" aria-label="WhatColorAreHue home">whatcolorarehue<span>.</span></a>
+    <span class="header-note">PERSONAL COLOR WORKSPACE</span>
+  </header>
+  <main class="auth-layout">
+    <section class="art-panel" aria-label="Color study illustration">
+      <div class="art-header"><span>COLOR STUDY</span><span>№ 001—004</span></div>
+      <div class="composition" aria-hidden="true">
+        <div class="shape shape-one"></div>
+        <div class="shape shape-two"></div>
+        <div class="shape shape-three"></div>
+        <div class="shape shape-four"></div>
+        <div class="focus-ring"></div>
+      </div>
+      <div class="art-footer"><span>HueSee / HueFind / HueDo / HueMemory</span><span>2026</span></div>
+    </section>
+    <section class="auth-panel" aria-labelledby="auth-title">
+      <div class="auth-content">
+        <div class="section-index"><span class="index-line"></span> YOUR ACCOUNT</div>
+        <h1 id="auth-title">Welcome <em>back.</em></h1>
+        <p id="auth-subtitle" class="subtitle">Sign in to access your saved colors and tasks.</p>
+        <div class="auth-tabs" role="tablist" aria-label="Account action">
+          <button id="signin-tab" role="tab" aria-controls="auth-form" aria-selected="true" type="button" class="is-active">Sign in</button>
+          <button id="signup-tab" role="tab" aria-controls="auth-form" aria-selected="false" type="button">Create account</button>
+        </div>
+        <form id="auth-form" novalidate>
+          <div class="field" id="name-field" hidden><label for="auth-name">Your name</label><input id="auth-name" autocomplete="name" name="name" type="text" maxlength="70" placeholder="Full name" /></div>
+          <div class="field"><label for="auth-email">Email address</label><input id="auth-email" autocomplete="email" name="email" inputmode="email" type="email" required placeholder="you@example.com" /></div>
+          <div class="field"><div class="field-heading"><label for="auth-password">Password</label><span id="password-hint" hidden>12 characters minimum</span></div>
+            <div class="password-wrap"><input id="auth-password" autocomplete="current-password" name="password" type="password" required placeholder="Enter your password" /><button id="show-password" class="reveal-password" type="button" aria-label="Show password" aria-pressed="false">Show</button></div>
+          </div>
+          <div class="status" role="status" aria-live="polite" id="form-status"></div>
+          <button type="submit" class="submit-button" id="submit-auth"><span id="submit-label">Sign in</span><span aria-hidden="true">↗</span></button>
+        </form>
+        <div class="or-divider"><span></span><span>or continue with</span><span></span></div>
+        <a class="google-button" id="google-auth" href="/api/auth/google" aria-label="Continue with Google">
+          <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20"><path fill="#4285F4" d="M21.35 12.2c0-.71-.06-1.37-.18-2.01H12v3.8h5.24a4.48 4.48 0 0 1-1.95 2.94v2.45h3.15c1.84-1.69 2.91-4.19 2.91-7.18z"/><path fill="#34A853" d="M12 21.5c2.62 0 4.82-.87 6.43-2.35l-3.15-2.45c-.88.59-2 0.94-3.28.94-2.52 0-4.66-1.71-5.43-4.02H3.33v2.52A9.72 9.72 0 0 0 12 21.5z"/><path fill="#FBBC05" d="M6.57 13.62a5.85 5.85 0 0 1 0-3.25V7.85H3.33a9.73 9.73 0 0 0 0 8.29z"/><path fill="#EA4335" d="M12 6.36c1.43 0 2.72.49 3.73 1.46l2.8-2.8A9.28 9.28 0 0 0 12 2.5a9.72 9.72 0 0 0-8.67 5.35l3.24 2.52C7.34 8.07 9.48 6.36 12 6.36z"/></svg>
+          <span>Continue with Google</span>
+        </a>
+        <a class="demo-button" id="demo-entry" href="/demo">Continue without signing in <span aria-hidden="true">→</span></a>
+        <p class="demo-note">Try HueSee and HueFind now. Saving colors and guides requires an account later.</p>
+        <p class="account-note" id="auth-config-note" role="status" aria-live="polite"></p>
+      </div>
+    </section>
+  </main>
+  <footer class="auth-footer"><span>WHATCOLORAREHUE</span><span>HACKUMASS XIV · 2026</span></footer>
+</body>
+</html>

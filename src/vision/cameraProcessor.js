@@ -1,7 +1,7 @@
 
 import { summarizeFrameColors } from "./colorDetector.js";
 
-export function analyzeVideoFrame(video, canvas) {
+export function analyzeVideoFrame(video, canvas, stabilizer = null) {
   if (!video || !canvas) {
     throw new Error("Video and canvas are required.");
   }
@@ -41,7 +41,7 @@ export function analyzeVideoFrame(video, canvas) {
   );
 
   // Identify the colors using our existing code.
-  const colors = summarizeFrameColors(imageData);
+  const colors = summarizeFrameColors(imageData, stabilizer);
 
   return {
     ready: true,
