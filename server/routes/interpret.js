@@ -1,8 +1,108 @@
 import { Router } from "express";
 import { GoogleGenAI, Type } from "@google/genai";
+import { parseInstruction, describeTarget, describeTask, isSortTask } from "../../public/js/hueDoParser.js";
 
 const router = Router();
-const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+
+// Free Gemini keys have a small per-minute limit for each model (error 429), and models can be busy (503).
+// Strategy: never wait long. If a model is limited, rest it for a minute and go straight to the next model.
+const BUSY = [429, 500, 503];
+const SKIP = [400, 404]; // model missing or not allowed for this key: move on to the next one
+const REQUEST_TIMEOUT_MS = 20000;
+const isBusy = (error) => BUSY.includes(Number(error?.status)) || !Number(error?.status);
+const restingUntil = new Map(); // model -> time it can be used again
+let fallbackModels = null;
+let lastGoodModel = null;
+
+async function getFallbackModels() {
+  if (fallbackModels) return fallbackModels;
+  const fromEnv = String(process.env.GEMINI_FALLBACK_MODELS || "").split(",").map((name) => name.trim()).filter(Boolean);
+  if (fromEnv.length) {
+    fallbackModels = fromEnv;
+  } else {
+    // Ask Google which models this key can use, and keep the general "flash" ones.
+    const names = [];
+    try {
+      const pager = await ai.models.list({ config: { pageSize: 100 } });
+      for await (const model of pager) {
+        const name = String(model.name || "").replace(/^models\//, "");
+        const actions = model.supportedActions || [];
+        if (!/flash/i.test(name) || /(image|tts|audio|live|embed|vision-only)/i.test(name)) continue;
+        if (actions.length && !actions.includes("generateContent")) continue;
+        names.push(name);
+      }
+    } catch (error) {
+      console.warn("Could not list Gemini models:", error.message);
+    }
+    // Newest first, and "lite" models (fastest) ahead of the others.
+    fallbackModels = names
+      .filter((name) => name !== MODEL)
+      .sort()
+      .reverse()
+      .sort((first, second) => Number(/lite/.test(second)) - Number(/lite/.test(first)))
+      .slice(0, 6);
+  }
+  console.log("Gemini backup models:", fallbackModels.join(", ") || "(none found)");
+  return fallbackModels;
+}
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function generateWithRetry(request, { avoidLite = false } = {}) {
+  const backups = await getFallbackModels();
+  let order = [...new Set([lastGoodModel, MODEL, ...backups].filter(Boolean))];
+  if (avoidLite && order.some((model) => !/lite/.test(model))) order = order.filter((model) => !/lite/.test(model));
+  const ready = order.filter((model) => (restingUntil.get(model) || 0) <= Date.now());
+  let lastError = null;
+
+  for (const model of ready.length ? ready : order) {
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const started = Date.now();
+      try {
+        const response = await ai.models.generateContent({
+          ...request,
+          model,
+          config: { ...request.config, httpOptions: { timeout: REQUEST_TIMEOUT_MS } }
+        });
+        if (model !== lastGoodModel) console.log(`Using Gemini model ${model}.`);
+        console.log(`Gemini ${model} answered in ${((Date.now() - started) / 1000).toFixed(1)}s.`);
+        if (!avoidLite) lastGoodModel = model;
+        response.modelUsed = model;
+        return response;
+      } catch (error) {
+        lastError = error;
+        const status = Number(error?.status);
+        if (status === 429) {
+          // Limit reached for this model: rest it for a minute and switch right away.
+          restingUntil.set(model, Date.now() + 60_000);
+          console.warn(`Gemini ${model} hit its rate limit (429). Switching models.`);
+          break;
+        }
+        if (SKIP.includes(status) && model !== MODEL) break;
+        if (!isBusy(error)) throw error;
+        if (attempt < 2 && status === 503) {
+          console.warn(`Gemini ${model} is busy (503). Retrying once…`);
+          await wait(800);
+          continue;
+        }
+        console.warn(`Gemini ${model} failed (${status || error.message}). Switching models.`);
+        break;
+      }
+    }
+  }
+  throw lastError;
+}
+
+function geminiErrorMessage(error, fallback) {
+  const status = Number(error?.status);
+  if (status === 429) return "Your Gemini key hit its free per-minute limit on every model. Wait about a minute and try again.";
+  if (status === 503) return "Gemini is busy right now. Wait a few seconds and try again.";
+  if (!status) return "Couldn't reach Gemini. Check your internet connection and try again.";
+  if (status === 404) return "That Gemini model isn't available. Set GEMINI_MODEL in .env (for example gemini-3.8-flash) and restart the server.";
+  if (status === 400 || status === 403) return "Gemini rejected the request. Check GEMINI_API_KEY in .env.";
+  return fallback;
+}
 
 const locationSchema = {
   type: Type.OBJECT,
@@ -63,16 +163,6 @@ const taskSchema = {
   required: ["summary", "steps", "visualCues"]
 };
 
-const checkSchema = {
-  type: Type.OBJECT,
-  properties: {
-    done: { type: Type.BOOLEAN, description: "True only if the picture clearly shows the task is complete" },
-    message: { type: Type.STRING, description: "One short sentence for the user: what you see and, if not done, what is still needed" },
-    locations: { type: Type.ARRAY, items: locationSchema, description: "Boxes around the target and destination in this picture" }
-  },
-  required: ["done", "message"]
-};
-
 let ai = null;
 
 function geminiReady(res) {
@@ -99,24 +189,59 @@ function readImage(image) {
   return { part: { inlineData: { mimeType: image.mimeType, data: image.data } } };
 }
 
-function cleanLocations(list) {
+// Models word their boxes differently ("box_2d", "bbox", {ymin,...}, 0-1 or 0-1000). Accept all of them.
+function readBox(item) {
+  let raw = item?.box_2d ?? item?.box2d ?? item?.bbox ?? item?.box ?? item?.bounding_box ?? item?.boundingBox;
+  if (raw && !Array.isArray(raw) && typeof raw === "object") {
+    raw = [raw.ymin ?? raw.y_min ?? raw.top, raw.xmin ?? raw.x_min ?? raw.left, raw.ymax ?? raw.y_max ?? raw.bottom, raw.xmax ?? raw.x_max ?? raw.right];
+  }
+  if (!Array.isArray(raw) || raw.length !== 4) return null;
+  let values = raw.map((value) => Number(value));
+  if (values.some((value) => !Number.isFinite(value))) return null;
+  if (values.every((value) => value <= 1)) values = values.map((value) => value * 1000);
+  const [y1, x1, y2, x2] = values.map((value) => Math.min(1000, Math.max(0, value)));
+  if (y2 <= y1 || x2 <= x1) return null;
+  return { x: x1 / 1000, y: y1 / 1000, width: (x2 - x1) / 1000, height: (y2 - y1) / 1000 };
+}
+
+function cleanLocations(list, destination = "", max = 6) {
   if (!Array.isArray(list)) return [];
-  return list.slice(0, 6).map((item) => {
-    const box = Array.isArray(item?.box_2d) ? item.box_2d.map((value) => Math.min(1000, Math.max(0, Number(value) || 0))) : [];
-    if (box.length !== 4) return null;
-    const [y1, x1, y2, x2] = box;
-    if (y2 <= y1 || x2 <= x1) return null;
-    return {
-      label: String(item.label || "").trim().slice(0, 60),
-      role: ["target", "destination"].includes(String(item.role).toLowerCase()) ? String(item.role).toLowerCase() : "other",
-      box: { x: x1 / 1000, y: y1 / 1000, width: (x2 - x1) / 1000, height: (y2 - y1) / 1000 },
-      description: String(item.description || "").trim().slice(0, 200)
-    };
+  const locations = list.slice(0, max).map((item) => {
+    const box = readBox(item);
+    if (!box) return null;
+    const label = String(item.label || item.name || "").trim().slice(0, 60);
+    let role = String(item.role || "").toLowerCase();
+    if (!["target", "destination"].includes(role)) {
+      role = destination && label.toLowerCase().includes(destination.toLowerCase()) ? "destination" : "other";
+    }
+    return { label, role, box, description: String(item.description || "").trim().slice(0, 200) };
   }).filter(Boolean);
+  // If the model forgot the roles, the first non-destination box is the target.
+  if (!locations.some((location) => location.role === "target")) {
+    const first = locations.find((location) => location.role !== "destination");
+    if (first) first.role = "target";
+  }
+  return locations;
+}
+
+function parseJsonList(text) {
+  const cleaned = String(text || "").replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
+  try {
+    const parsed = JSON.parse(cleaned);
+    if (Array.isArray(parsed)) return parsed;
+    for (const key of ["objects", "locations", "detections", "boxes", "items", "results"]) {
+      if (Array.isArray(parsed?.[key])) return parsed[key];
+    }
+    const anyList = parsed && typeof parsed === "object" ? Object.values(parsed).find(Array.isArray) : null;
+    if (anyList) return anyList;
+    return parsed && typeof parsed === "object" ? [parsed] : [];
+  } catch {
+    return [];
+  }
 }
 
 async function askGemini(parts, schema) {
-  const response = await ai.models.generateContent({
+  const response = await generateWithRetry({
     model: MODEL,
     contents: [{ role: "user", parts }],
     config: { responseMimeType: "application/json", responseSchema: schema }
@@ -125,18 +250,6 @@ async function askGemini(parts, schema) {
 }
 
 // Gemini's object-detection style request: works better than asking for boxes inside a bigger answer.
-function parseJsonList(text) {
-  const cleaned = String(text || "").replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
-  try {
-    const parsed = JSON.parse(cleaned);
-    if (Array.isArray(parsed)) return parsed;
-    if (Array.isArray(parsed?.locations)) return parsed.locations;
-    if (Array.isArray(parsed?.objects)) return parsed.objects;
-    return parsed && typeof parsed === "object" ? [parsed] : [];
-  } catch {
-    return [];
-  }
-}
 
 async function detectObjects(imagePart, target, destination) {
   const things = [target && `the ${target} (role "target")`, destination && `${destination} (role "destination")`].filter(Boolean);
@@ -146,14 +259,150 @@ async function detectObjects(imagePart, target, destination) {
     "Output a JSON list. Each entry has \"box_2d\" as [ymin, xmin, ymax, xmax] normalized to 0-1000, a short \"label\", and \"role\".",
     "Box the whole object. Match the color carefully. Leave out anything that is not visible. Output only the JSON list."
   ].join("\n");
-  const response = await ai.models.generateContent({
+  const response = await generateWithRetry({
     model: MODEL,
     contents: [{ role: "user", parts: [{ text: prompt }, imagePart] }],
     config: { responseMimeType: "application/json", temperature: 0.2 }
   });
-  const locations = cleanLocations(parseJsonList(response.text));
+  const locations = cleanLocations(parseJsonList(response.text), destination);
   console.log(`HueDo found ${locations.length} location(s) for "${things.join(", ")}":`, JSON.stringify(locations));
   return locations;
+}
+
+const locateSchema = {
+  type: Type.OBJECT,
+  properties: {
+    answer: { type: Type.STRING, description: "One short sentence saying where the target is, using position words, not color alone" },
+    objects: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          box_2d: { type: Type.ARRAY, items: { type: Type.INTEGER }, description: "[ymin, xmin, ymax, xmax] normalized to 0-1000" },
+          label: { type: Type.STRING },
+          role: { type: Type.STRING, enum: ["target", "destination"] }
+        },
+        required: ["box_2d", "label", "role"]
+      }
+    }
+  },
+  required: ["answer", "objects"]
+};
+
+// One request that both finds the object and says where it is. Used for simple "find / put X" instructions.
+async function locateWithAnswer(imagePart, target, destination) {
+  const things = [`the ${target} (role "target")`, destination && `${destination} (role "destination")`].filter(Boolean);
+  const prompt = [
+    `Find ${things.join(" and ")} in this image, for a user who is color blind.`,
+    "Return JSON: {\"answer\": one short sentence saying where the target is using position words (left, right, top, in someone's hand) and not color alone, or saying it is not visible; \"objects\": a list where each entry has \"box_2d\" as [ymin, xmin, ymax, xmax] normalized to 0-1000, a short \"label\", and \"role\"}.",
+    "If there is more than one matching target (for example \"pens\"), box every one of them.",
+    "Box the whole object. Match the color carefully: do not box skin or lips unless asked. Leave out anything that is not visible."
+  ].join("\n");
+  const request = {
+    contents: [{ role: "user", parts: [{ text: prompt }, imagePart] }],
+    config: { responseMimeType: "application/json", responseSchema: locateSchema, temperature: 0.2 }
+  };
+
+  const read = (response) => {
+    let answer = "";
+    try {
+      answer = String(JSON.parse(String(response.text || "").replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "")).answer || "").trim();
+    } catch {
+      answer = "";
+    }
+    return { answer, locations: cleanLocations(parseJsonList(response.text), destination) };
+  };
+
+  let response = await generateWithRetry(request);
+  let result = read(response);
+  if (!result.locations.length) {
+    console.log(`Gemini's raw reply (${response.modelUsed}) was:`, String(response.text || "").slice(0, 500));
+    // "Lite" models are fast but sometimes skip the boxes. Ask a full model once.
+    if (/lite/.test(response.modelUsed || "")) {
+      try {
+        console.log("No box from the lite model. Asking a full model…");
+        response = await generateWithRetry(request, { avoidLite: true });
+        const second = read(response);
+        if (second.locations.length) result = { answer: second.answer || result.answer, locations: second.locations };
+      } catch (error) {
+        console.error("Full model failed:", error.message);
+      }
+    }
+  }
+  console.log(`HueDo found ${result.locations.length} location(s) for "${things.join(", ")}":`, JSON.stringify(result.locations));
+  return result;
+}
+
+const sortSchema = {
+  type: Type.OBJECT,
+  properties: {
+    answer: { type: Type.STRING, description: "One or two short sentences: how many items and which groups, with positions" },
+    objects: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          box_2d: { type: Type.ARRAY, items: { type: Type.INTEGER }, description: "[ymin, xmin, ymax, xmax] normalized to 0-1000" },
+          group: { type: Type.STRING, description: "Short group name, usually the color, for example red, navy, white striped" },
+          role: { type: Type.STRING, enum: ["target", "destination"] }
+        },
+        required: ["box_2d", "group", "role"]
+      }
+    }
+  },
+  required: ["answer", "objects"]
+};
+
+// Sorting: box every item and give it a group name (usually its color) so a color-blind user can sort by label.
+async function sortItems(imagePart, things, destination) {
+  const prompt = [
+    `Find every one of the ${things} in this image, for a user who is color blind and wants to sort them by color.`,
+    "For each item return \"box_2d\" as [ymin, xmin, ymax, xmax] normalized to 0-1000, role \"target\", and \"group\": a short, plain color name (for example red, navy blue, white striped).",
+    "Items that should go together must have exactly the same group name. Use as few groups as make sense.",
+    destination ? `Also box ${destination} with role "destination" and group set to its name.` : "",
+    "\"answer\": one or two short sentences saying how many items there are and what the groups are.",
+    "Leave out anything that is not visible. Do not box people, skin, or clothing being worn unless asked."
+  ].filter(Boolean).join("\n");
+  const request = {
+    contents: [{ role: "user", parts: [{ text: prompt }, imagePart] }],
+    config: { responseMimeType: "application/json", responseSchema: sortSchema, temperature: 0.2 }
+  };
+
+  const read = (response) => {
+    let parsed = {};
+    try {
+      parsed = JSON.parse(String(response.text || "").replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, ""));
+    } catch {
+      parsed = {};
+    }
+    const list = (Array.isArray(parsed.objects) ? parsed.objects : parseJsonList(response.text))
+      .map((item) => ({ ...item, label: String(item?.group || item?.label || "").trim().toLowerCase() }));
+    const locations = cleanLocations(list, destination, 16).map((location) => (
+      location.role === "destination" ? location : { ...location, role: "target" }
+    ));
+    return { answer: String(parsed.answer || "").trim(), locations };
+  };
+
+  let response = await generateWithRetry(request);
+  let result = read(response);
+  if (!result.locations.length && /lite/.test(response.modelUsed || "")) {
+    console.log("No boxes from the lite model. Asking a full model…");
+    try {
+      response = await generateWithRetry(request, { avoidLite: true });
+      result = read(response);
+    } catch (error) {
+      console.error("Full model failed:", error.message);
+    }
+  }
+
+  const counts = new Map();
+  result.locations.filter((location) => location.role === "target").forEach((location) => {
+    const name = location.label || "other";
+    counts.set(name, (counts.get(name) || 0) + 1);
+  });
+  const groups = [...counts].map(([name, count]) => ({ name, count }));
+  console.log(`HueDo sorted ${result.locations.length} item(s) into ${groups.length} group(s):`, JSON.stringify(groups));
+  return { ...result, groups };
 }
 
 router.post("/", async (req, res) => {
@@ -169,6 +418,49 @@ router.post("/", async (req, res) => {
   if (error) return res.status(status).json({ error });
 
   try {
+    // Fast path: for simple instructions like "where is the pink pen" or "put the green block in Box B",
+    // read the words locally and make just one Gemini request to find the object.
+    const quick = instruction ? parseInstruction(instruction) : null;
+    const quickTarget = quick ? describeTarget(quick) : "";
+
+    // Sorting: "sort the socks", "group the blocks by color".
+    if (imagePart && quick && isSortTask(quick)) {
+      const { locations, answer, groups } = await sortItems(imagePart, quickTarget || "items", quick.destination);
+      return res.json({
+        summary: describeTask(quick),
+        steps: [],
+        visualCues: [],
+        targetColor: "",
+        targetObject: quick.object || "items",
+        action: quick.action,
+        destination: quick.destination,
+        relation: quick.relation,
+        completionHint: "",
+        answer,
+        locations,
+        groups,
+        locateBusy: false
+      });
+    }
+
+    if (imagePart && quickTarget) {
+      const { locations, answer } = await locateWithAnswer(imagePart, quickTarget, quick.destination);
+      return res.json({
+        summary: describeTask(quick),
+        steps: [],
+        visualCues: [],
+        targetColor: quick.color,
+        targetObject: quick.object,
+        action: quick.action,
+        destination: quick.destination,
+        relation: quick.relation,
+        completionHint: "",
+        answer,
+        locations,
+        locateBusy: false
+      });
+    }
+
     const prompt = [
       "You are the task interpreter for an accessibility app for people who cannot rely on color.",
       "Interpret the complete instruction, whatever its subject or action. Do not assume it is a color-sorting task or that it has a destination.",
@@ -192,13 +484,17 @@ router.post("/", async (req, res) => {
     }
 
     let locations = imagePart ? cleanLocations(parsed.locations) : [];
+    let locateBusy = false;
     if (imagePart) {
-      const target = [parsed.targetColor, parsed.targetObject].filter(Boolean).join(" ").trim() || String(parsed.summary);
-      try {
-        const detected = await detectObjects(imagePart, target, String(parsed.destination || "").trim());
-        if (detected.length) locations = detected;
-      } catch (error) {
-        console.error("Gemini detection error:", error.message);
+      {
+        const target = [parsed.targetColor, parsed.targetObject].filter(Boolean).join(" ").trim() || String(parsed.summary);
+        try {
+          const detected = await detectObjects(imagePart, target, String(parsed.destination || "").trim());
+          if (detected.length) locations = detected;
+        } catch (error) {
+          console.error("Gemini detection error:", error.message);
+          locateBusy = true;
+        }
       }
     }
 
@@ -225,11 +521,12 @@ router.post("/", async (req, res) => {
       relation: String(parsed.relation || "").trim().toLowerCase(),
       completionHint: String(parsed.completionHint || "").trim(),
       answer: imagePart ? String(parsed.answer || "").trim() : "",
-      locations
+      locations,
+      locateBusy
     });
   } catch (error) {
     console.error("Gemini error:", error);
-    res.status(502).json({ error: "Gemini could not interpret this instruction. Try again." });
+    res.status(502).json({ error: geminiErrorMessage(error, "Gemini could not interpret this instruction. Try again.") });
   }
 });
 
@@ -252,27 +549,28 @@ router.post("/check", async (req, res) => {
       `Task: ${summary}`,
       target ? `Target object: ${target}` : "",
       destination ? `Destination: ${destination}` : "",
-      "Look at the attached picture. Set done to true only if it clearly shows the task is complete (for example the target object is inside or on the destination).",
-      "Add locations with box_2d as [ymin, xmin, ymax, xmax] scaled 0 to 1000 for the target and destination if you can see them.",
-      "Write message as one short sentence, without relying on color alone."
+      "Look at the attached picture. Set done to true only if it clearly shows the task is complete (for example the target object is inside or on the destination, or for a sorting task every item is next to the items that match it).",
+      "Return JSON: {\"done\": true or false, \"message\": one short sentence for the user without relying on color alone, \"objects\": a list where each entry has \"box_2d\" as [ymin, xmin, ymax, xmax] normalized to 0-1000, a short \"label\", and \"role\" (target or destination)}."
     ].filter(Boolean).join("\n");
 
-    const parsed = await askGemini([{ text: prompt }, imagePart], checkSchema);
-    let locations = cleanLocations(parsed.locations);
+    const response = await generateWithRetry({
+      contents: [{ role: "user", parts: [{ text: prompt }, imagePart] }],
+      config: { responseMimeType: "application/json", temperature: 0.2 }
+    });
+    let parsed = {};
     try {
-      const detected = await detectObjects(imagePart, target, destination);
-      if (detected.length) locations = detected;
-    } catch (error) {
-      console.error("Gemini detection error:", error.message);
+      parsed = JSON.parse(String(response.text || "").replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, ""));
+    } catch {
+      parsed = {};
     }
     res.json({
       done: parsed.done === true,
       message: String(parsed.message || "").trim(),
-      locations
+      locations: cleanLocations(parsed.objects || parsed.locations, destination, 16)
     });
   } catch (error) {
     console.error("Gemini check error:", error);
-    res.status(502).json({ error: "Gemini could not check this picture. Try again." });
+    res.status(502).json({ error: geminiErrorMessage(error, "Gemini could not check this picture. Try again.") });
   }
 });
 

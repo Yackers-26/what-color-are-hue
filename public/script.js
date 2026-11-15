@@ -5,6 +5,7 @@ import {
   createTask,
   loadTasks,
   completeTask,
+  deleteTask,
   interpret,
   checkTask
 } from "/js/huememory.js";
@@ -15,7 +16,9 @@ import {
   describeTask,
   describeTarget,
   normalizeColorName,
-  normalizeRelation
+  normalizeRelation,
+  isPlural,
+  isSortTask
 } from "/js/hueDoParser.js";
 import { mountImagePicker } from "/js/imagePicker.js";
 
@@ -53,6 +56,7 @@ const saveColorStatus = $("saveColorStatus");
 const detectedColorsList = $("detectedColors");
 const contrastToggle = $("contrastToggle");
 const textSizeToggle = $("textSizeToggle");
+const soundToggle = $("soundToggle");
 const colorChipToggle = $("colorChipToggle");
 const cameraChipLayer = $("cameraChipLayer");
 const modePreview = $("modePreview");
@@ -976,6 +980,34 @@ textSizeToggle.addEventListener("click", () => {
   textSizeToggle.querySelector("span:last-child").textContent = enabled ? "Standard" : "Text size";
 });
 
+// Spoken directions and the chime can be turned off. The choice is remembered on this computer.
+let soundOn = true;
+try {
+  soundOn = localStorage.getItem("hue-sound") !== "off";
+} catch {
+  soundOn = true;
+}
+
+function showSoundState() {
+  soundToggle.setAttribute("aria-pressed", String(soundOn));
+  soundToggle.setAttribute("aria-label", soundOn ? "Turn sound off" : "Turn sound on");
+  soundToggle.querySelector("span:first-child").textContent = soundOn ? "🔊" : "🔇";
+  soundToggle.querySelector("span:last-child").textContent = soundOn ? "Sound on" : "Sound off";
+}
+
+soundToggle.addEventListener("click", () => {
+  soundOn = !soundOn;
+  try {
+    localStorage.setItem("hue-sound", soundOn ? "on" : "off");
+  } catch {
+    // Not remembered, but the switch still works for this visit.
+  }
+  if (!soundOn && "speechSynthesis" in window) window.speechSynthesis.cancel();
+  showSoundState();
+  if (soundOn) speak("Sound on.");
+});
+showSoundState();
+
 colorChipToggle.addEventListener("click", () => {
   showColorChips = !showColorChips;
   colorChipToggle.setAttribute("aria-pressed", String(showColorChips));
@@ -1289,6 +1321,9 @@ interpretBtn.addEventListener("click", async () => {
     const basic = parseInstruction(text);
     const target = describeTarget({ color: result.targetColor || basic.color, object: result.targetObject || basic.object });
     const foundTarget = (result.locations || []).some((location) => location.role === "target");
+    const missingNote = result.locateBusy
+      ? `Gemini was too busy to circle the ${target} just now. Press Build visual guide again in a few seconds.`
+      : `I couldn't find the ${target} in this picture. Try another picture.`;
     showDraft({
       summary: result.summary || text,
       steps: Array.isArray(result.steps) ? result.steps : [],
@@ -1298,8 +1333,9 @@ interpretBtn.addEventListener("click", async () => {
       action: result.action || basic.action || "",
       destination: result.destination || basic.destination || "",
       relation: result.relation || basic.relation || "",
-      answer: result.answer || (target && !foundTarget ? `I couldn't find the ${target} in this picture. Try another picture.` : ""),
-      locations: result.locations || []
+      answer: [result.answer, target && !foundTarget ? missingNote : ""].filter(Boolean).join(" "),
+      locations: result.locations || [],
+      groups: Array.isArray(result.groups) ? result.groups : []
     }, "Read by Gemini. Fix anything that's wrong, then start.");
     setFeedback(interpretStatus, "Check the details below.");
   } catch (error) {
@@ -1311,8 +1347,8 @@ interpretBtn.addEventListener("click", async () => {
       steps: [],
       visualCues: [],
       locations: [],
-      answer: target ? `I need Gemini to find the ${target} in the picture.` : ""
-    }, "Gemini wasn't available, so I used a basic reading and couldn't look at the picture.");
+      answer: target ? `Nothing is circled because Gemini didn't answer: ${error.message}` : ""
+    }, `Gemini didn't answer (${error.message}), so I used a basic reading and couldn't look at the picture.`);
     setFeedback(interpretStatus, `Gemini: ${error.message}`);
   } finally {
     interpretBtn.disabled = false;
@@ -1347,7 +1383,7 @@ saveTaskBtn.addEventListener("click", async () => {
 
   parsedTask.hidden = true;
   setFeedback(interpretStatus, `Guide started.${saveNote}`);
-  setActiveTask({ ...saved, answer, locations }, { prefix: `Starting: ${sentence}` });
+  setActiveTask({ ...saved, groups: task.groups || [], answer, locations }, { prefix: `Starting: ${sentence}` });
   setActiveMode("do");
 });
 
@@ -1410,7 +1446,8 @@ function stepStatusText(step) {
   if (step.kind === "find") {
     if (!scenePhoto) return "Take or upload a picture, then press Build visual guide to circle it.";
     const found = sceneLocations.some((location) => location.role === "target");
-    return activeTask.answer || (found ? `The ${targetLabel()} is circled.` : `I couldn't find the ${targetLabel()} in this picture.`);
+    const isAre = isPlural(activeTask.object) ? "are" : "is";
+    return activeTask.answer || (found ? `The ${targetLabel()} ${isAre} circled.` : `I couldn't find the ${targetLabel()} in this picture.`);
   }
   if (step.kind === "place") {
     return streaming
@@ -1428,7 +1465,7 @@ function goToStep(index, { prefix = "", announce = true } = {}) {
 
   const targetMissing = step.kind === "find" && !sceneLocations.some((location) => location.role === "target");
   const stepText = targetMissing
-    ? `I couldn't find the ${targetLabel()} in this picture. Take a new picture and press Build visual guide again.`
+    ? `The ${targetLabel()} ${isPlural(activeTask.object) ? "aren't" : "isn't"} circled yet. Press Build visual guide again, or take a new picture.`
     : step.text;
   guideStepCount.textContent = `Step ${guideStepIndex + 1} of ${steps.length}`;
   guideStepText.textContent = stepText;
@@ -1478,7 +1515,9 @@ checkPictureBtn.addEventListener("click", async () => {
       completeActiveTask(true, result.message);
     } else {
       renderScene();
-      const message = result.message || `Not done yet. Put the ${targetLabel()} ${normalizeRelation(activeTask.relation)} ${destinationLabel()}, then check again.`;
+      const message = result.message || (isSortTask(activeTask) || !activeTask.destination
+        ? "Not done yet. Fix it, then check again."
+        : `Not done yet. Put the ${targetLabel()} ${normalizeRelation(activeTask.relation)} ${destinationLabel()}, then check again.`);
       setFeedback(taskResult, message);
       speak(message);
     }
@@ -1516,6 +1555,7 @@ taskBtn.addEventListener("click", () => {
 });
 
 function playChime() {
+  if (!soundOn) return;
   try {
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextClass) return;
@@ -1647,6 +1687,21 @@ function renderTaskLibrary(tasks) {
     });
     actions.append(useButton);
 
+    const removeButton = document.createElement("button");
+    removeButton.type = "button";
+    removeButton.textContent = "Remove";
+    removeButton.setAttribute("aria-label", `Remove saved guide: ${title.textContent}`);
+    removeButton.addEventListener("click", async () => {
+      removeButton.disabled = true;
+      try {
+        await deleteTask(task._id);
+        await refreshTaskLibrary();
+      } catch (error) {
+        removeButton.disabled = false;
+        meta.textContent = error.message || "Could not remove guide.";
+      }
+    });
+
     if (!task.completed) {
       const doneButton = document.createElement("button");
       doneButton.type = "button";
@@ -1664,6 +1719,7 @@ function renderTaskLibrary(tasks) {
       });
       actions.append(doneButton);
     }
+    actions.append(removeButton);
 
     row.append(copy, actions);
     taskLibrary.append(row);
@@ -1674,7 +1730,7 @@ refreshTasksBtn.addEventListener("click", refreshTaskLibrary);
 
 function speak(text) {
   announcer.textContent = text;
-  if ("speechSynthesis" in window && "SpeechSynthesisUtterance" in window) {
+  if (soundOn && "speechSynthesis" in window && "SpeechSynthesisUtterance" in window) {
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
     window.speechSynthesis.speak(utterance);

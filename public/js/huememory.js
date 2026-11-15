@@ -103,6 +103,12 @@ export function completeTask(id, completed = true) {
   });
 }
 
+export function deleteTask(id) {
+  return request(`/api/tasks/${encodeURIComponent(id)}?sessionId=${encodeURIComponent(getSessionId())}`, {
+    method: "DELETE"
+  });
+}
+
 // Optional image payload: { mimeType, data } where data is base64 without the data URL prefix.
 export function interpret(text = "", image = null) {
   return request("/api/interpret", {

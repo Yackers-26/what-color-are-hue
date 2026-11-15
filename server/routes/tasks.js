@@ -37,6 +37,15 @@ router.post("/", async (req, res) => {
     createdAt: new Date()
   };
 
+  // Starting the same guide again reuses the open saved guide instead of adding a copy.
+  const { createdAt, completed, ...latest } = task;
+  const existing = await tasks().findOneAndUpdate(
+    { sessionId: task.sessionId, summary: task.summary, completed: false },
+    { $set: { ...latest, updatedAt: new Date() } },
+    { returnDocument: "after" }
+  );
+  if (existing) return res.json(existing);
+
   const result = await tasks().insertOne(task);
   res.status(201).json({ _id: result.insertedId, ...task });
 });
@@ -79,6 +88,16 @@ router.patch("/:id", async (req, res) => {
 
   if (!result) return res.status(404).json({ error: "Task not found" });
   res.json(result);
+});
+
+router.delete("/:id", async (req, res) => {
+  const { sessionId } = req.query;
+  if (!sessionId) return res.status(400).json({ error: "sessionId query param is required" });
+  if (!ObjectId.isValid(req.params.id)) return res.status(400).json({ error: "Invalid id" });
+
+  const result = await tasks().deleteOne({ _id: new ObjectId(req.params.id), sessionId: String(sessionId) });
+  if (!result.deletedCount) return res.status(404).json({ error: "Task not found" });
+  res.json({ deleted: true });
 });
 
 export default router;
