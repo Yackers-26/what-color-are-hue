@@ -2,7 +2,7 @@
 <div align="center">
   <img src="https://github.com/Yackers-26/what-color-are-hue/blob/main/wcahtypography.png?raw=true" alt="WhatColorAreHue? logo" width="220" />
   <h1>WhatColorAreHue?</h1>
-  <p><strong>Camera-powered color accessibility assistant built with JavaScript, Express, Gemini, and MongoDB.</strong></p>
+  <p><strong>AI-powered color accessibility assistant built with JavaScript, Express, Gemini, and MongoDB.</strong></p>
   <p>
     See it. Find it. Hue it.<br /><br />
     Try it out: https://whatcolorarehue.us
