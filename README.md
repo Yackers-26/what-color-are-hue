@@ -4,7 +4,7 @@
   <h1>WhatColorAreHue?</h1>
   <p><strong>Camera-powered color accessibility assistant built with JavaScript, Express, Gemini, and MongoDB.</strong></p>
   <p>
-    See colors. Find objects. Get things done—without relying on color alone.<br /><br />
+    See it. Find it. Hue it.<br /><br />
     Try it out: https://whatcolorarehue.us
   </p>
 </div>
